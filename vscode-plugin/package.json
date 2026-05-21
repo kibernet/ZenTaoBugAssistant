@@ -1,0 +1,176 @@
+{
+  "name": "zentao-bug-assistant-vscode",
+  "displayName": "ZenTao Bug Assistant",
+  "description": "Fetch assigned ZenTao bugs and send fix prompts to Cursor or Claude Code.",
+  "version": "1.0.0",
+  "publisher": "kibernet",
+  "icon": "images/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kibernet/ZenTaoBugAssistant"
+  },
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=18.0.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zentaoBugAssistant",
+          "title": "禅道助手",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "zentaoBugAssistant": [
+        {
+          "type": "webview",
+          "id": "zentaoBugAssistant.view",
+          "name": "禅道BUG修复AI助手"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "zentaoBugAssistant.openView",
+        "title": "禅道助手",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "zentaoBugAssistant.login",
+        "title": "禅道助手：登录",
+        "icon": "$(account)"
+      },
+      {
+        "command": "zentaoBugAssistant.refresh",
+        "title": "禅道助手：刷新 Bug",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "zentaoBugAssistant.fixSelected",
+        "title": "禅道助手：修复选中 Bug",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "zentaoBugAssistant.copyProjectDebugInfo",
+        "title": "禅道助手：复制项目调试信息",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "zentaoBugAssistant.crawlDebugInfo",
+        "title": "禅道助手：深度诊断 Bug 入口",
+        "icon": "$(search)"
+      }
+    ],
+    "menus": {
+      "commandCenter": [
+        {
+          "command": "zentaoBugAssistant.openView",
+          "group": "navigation@10"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "zentaoBugAssistant.refresh",
+          "when": "view == zentaoBugAssistant.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "zentaoBugAssistant.fixSelected",
+          "when": "view == zentaoBugAssistant.view",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "zentaoBugAssistant.openView"
+        },
+        {
+          "command": "zentaoBugAssistant.login"
+        },
+        {
+          "command": "zentaoBugAssistant.refresh"
+        },
+        {
+          "command": "zentaoBugAssistant.fixSelected"
+        },
+        {
+          "command": "zentaoBugAssistant.copyProjectDebugInfo"
+        },
+        {
+          "command": "zentaoBugAssistant.crawlDebugInfo"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "禅道 Bug 修复助手",
+      "properties": {
+        "zentaoBugAssistant.serverUrl": {
+          "type": "string",
+          "default": "http://zentao.yuwan-game.com:8088/",
+          "description": "禅道服务器地址。"
+        },
+        "zentaoBugAssistant.aiEngine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cursor",
+            "claudeCode"
+          ],
+          "default": "auto",
+          "description": "默认 AI 引擎。"
+        },
+        "zentaoBugAssistant.autoLogin": {
+          "type": "boolean",
+          "default": true,
+          "description": "启动时使用已保存会话自动登录。"
+        },
+        "zentaoBugAssistant.rememberPassword": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否保存禅道密码。"
+        },
+        "zentaoBugAssistant.teamMembers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "团队成员禅道账号列表，用于“看团队的 Bug”。"
+        },
+        "zentaoBugAssistant.autoSyncAfterFix": {
+          "type": "boolean",
+          "default": false,
+          "description": "发送 AI 修复提示词后，是否询问同步解决/关闭/指派到禅道。"
+        },
+        "zentaoBugAssistant.sessionKeepAliveIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "禅道会话保活间隔，单位分钟。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "package": "npm run package:vsix",
+    "package:vsix": "vsce package -o zentao-bug-assistant-%npm_package_version%.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.4.5"
+  }
+}

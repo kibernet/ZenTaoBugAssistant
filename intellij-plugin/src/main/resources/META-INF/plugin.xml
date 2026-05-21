@@ -1,0 +1,21 @@
+<idea-plugin>
+    <id>com.zentao.bugassistant</id>
+    <name>ZenTao Bug Assistant</name>
+    <version>1.0.0</version>
+    <vendor>Kibernet</vendor>
+
+    <description><![CDATA[
+        Fetch assigned ZenTao bugs and send fix prompts to Claude Code with GUI.
+    ]]></description>
+
+    <idea-version since-build="241"/>
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="禅道助手"
+            anchor="right"
+            icon="/META-INF/pluginIcon.svg"
+            factoryClass="com.zentao.bugassistant.ZenTaoBugAssistantToolWindowFactory" />
+    </extensions>
+</idea-plugin>

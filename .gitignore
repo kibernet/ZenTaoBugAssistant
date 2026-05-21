@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# VS Code / Cursor plugin outputs
+vscode-plugin/dist/
+vscode-plugin/out/
+vscode-plugin/*.vsix
+vscode-plugin/.vscode/
+
+# IntelliJ plugin outputs
+intellij-plugin/build/
+intellij-plugin/out/
+intellij-plugin/.gradle/
+intellij-plugin/.intellijPlatform/
+intellij-plugin/*.iml
+
+# Local tool bootstrap cache
+.tools/
+
+# IDE and editor state
+.idea/
+.vscode/
+.cursor/
+*.iml
+
+# Logs and caches
+*.log
+debug-*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+
+# Archives and packaged binaries
+*.zip
+*.jar
+
+# Keep Gradle Wrapper files if they are added later
+!gradle/wrapper/gradle-wrapper.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# Local secrets
+.env
+.env.*
+!.env.example
