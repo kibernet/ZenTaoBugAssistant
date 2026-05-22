@@ -1080,7 +1080,7 @@ function parseBugDetail(html: string, bugId: string, baseUrl: string): ZenTaoBug
   const actualResultHtml = readSectionHtml(html, ["实际结果"], baseUrl);
   const description = htmlText(descriptionHtml ?? "");
   const title = [readBugTitle(html, bugId), description]
-    .map((item) => item?.replace(/^#?\d+\s*/, "").trim())
+    .map((item) => (item ? stripBugIdPrefix(item, bugId) : undefined))
     .find((item) => item && item !== bugId);
   const text = htmlText(html);
 
@@ -1115,9 +1115,16 @@ function readBugTitle(html: string, bugId: string): string | undefined {
     ...matchAll(html, /<h1\b[\s\S]*?<\/h1>/gi),
     ...matchAll(html, /<[^>]*class=["'][^"']*(?:detail-title|bug-title)[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi)
   ]
-    .map((item) => htmlText(item).replace(/^#?\d+\s*/, "").replace(new RegExp(`^${escapeRegExp(bugId)}\\s*`), "").trim())
+    .map((item) => stripBugIdPrefix(htmlText(item), bugId))
     .filter((item) => item && item !== bugId && !/^#?\d+$/.test(item) && item.length > 4);
   return candidates[0];
+}
+
+function stripBugIdPrefix(value: string, bugId: string): string {
+  return value
+    .replace(new RegExp(`^(?:BUG\\s*)?#?${escapeRegExp(bugId)}(?:\\s+|\\s*[-:：#]\\s*)`, "i"), "")
+    .replace(new RegExp(`^(?:BUG\\s*)?#?${escapeRegExp(bugId)}$`, "i"), "")
+    .trim();
 }
 
 function readBugDescriptionHtml(html: string, baseUrl: string): string | undefined {

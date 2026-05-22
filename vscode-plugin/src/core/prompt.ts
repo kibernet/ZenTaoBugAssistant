@@ -29,6 +29,37 @@ ${reproduceImageText}
 3. 如何验证修复`;
 }
 
+export function buildBatchBugFixPrompt(bugs: ZenTaoBugDetail[]): string {
+  const body = bugs.map((bug, index) => {
+    const reproduceImages = extractReproduceStepImages(bug.reproduceStepsHtml).slice(0, maxImageAttachments);
+    const reproduceImageText = reproduceImages.length
+      ? reproduceImages.map((url, imageIndex) => `  - 图片${imageIndex + 1}：${url}`).join("\n")
+      : `  ${emptyText}`;
+    const bugDescription = textOrFallback(bug.description, bug.title);
+    const reproduceText = textOrFallback(htmlToPromptText(bug.reproduceStepsHtml), bug.reproduceSteps);
+    return `## ${index + 1}. Bug #${bug.id}
+
+Bug描述：
+${bugDescription}
+
+复现步骤文本：
+${reproduceText}
+
+复现步骤图片：
+${reproduceImageText}`;
+  }).join("\n\n---\n\n");
+
+  return `【批量Bug修复任务】
+以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。
+
+${body}
+
+完成后请按 Bug 编号分别说明：
+1. 根因是什么
+2. 修改了哪些关键位置
+3. 如何验证修复`;
+}
+
 function extractReproduceStepImages(html: string | undefined): string[] {
   if (!html) {
     return [];

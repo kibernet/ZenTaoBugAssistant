@@ -29,15 +29,15 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Image;
 import java.awt.datatransfer.StringSelection;
-import java.net.CookieManager;
-import java.net.CookiePolicy;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.text.Collator;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -87,6 +87,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final ComboBox<Item> projectBox = new ComboBox<>();
         private final ComboBox<Item> memberBox = new ComboBox<>();
         private final JPanel memberWrap = new JPanel(new BorderLayout(6, 0));
+        private final JCheckBox allFilterBox = new JCheckBox("全部", true);
         private final Map<String, JCheckBox> filterChecks = new LinkedHashMap<>();
         private final JLabel bugCountLabel = new JLabel("共 0 个 Bug");
         private final JButton refreshButton = new JButton("刷新");
@@ -107,6 +108,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private String preferredMemberAccount = "";
         private int currentPage = 1;
         private PreviewDialog previewDialog;
+        private boolean hydratingProjects = false;
+        private boolean hydratingMembers = false;
+        private boolean hydratingFilters = false;
 
         private ZenTaoBugAssistantPanel(Project project) {
             this.project = project;
@@ -148,7 +152,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             top.add(loginRow, c);
 
             JPanel projectRow = new JPanel(new BorderLayout(6, 0));
-            JButton refreshProjects = new JButton("刷新项目");
+            JButton refreshProjects = new JButton("刷新");
             refreshProjects.addActionListener(event -> loadProjects(true));
             projectRow.add(projectBox, BorderLayout.CENTER);
             projectRow.add(refreshProjects, BorderLayout.EAST);
@@ -156,12 +160,22 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             memberBox.setEditable(true);
             memberWrap.add(memberBox, BorderLayout.CENTER);
-            JButton refreshMembers = new JButton("刷新成员");
+            JButton refreshMembers = new JButton("刷新");
             refreshMembers.addActionListener(event -> loadMembers(true));
             memberWrap.add(refreshMembers, BorderLayout.EAST);
             addRow(top, c, 6, "成员", memberWrap);
 
             JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+            allFilterBox.addActionListener(event -> {
+                if (hydratingFilters) return;
+                hydratingFilters = true;
+                filterChecks.values().forEach(box -> box.setSelected(allFilterBox.isSelected()));
+                hydratingFilters = false;
+                savePreferences();
+                currentPage = 1;
+                renderBugs();
+            });
+            filters.add(allFilterBox);
             addFilter(filters, "assignedToMe", "我的");
             addFilter(filters, "unresolved", "未解决");
             addFilter(filters, "resolved", "已解决");
@@ -219,6 +233,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private void addFilter(JPanel filters, String key, String text) {
             JCheckBox box = new JCheckBox(text, true);
             box.addActionListener(event -> {
+                if (hydratingFilters) return;
+                refreshAllFilterState();
                 savePreferences();
                 currentPage = 1;
                 renderBugs();
@@ -232,10 +248,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             refreshButton.addActionListener(event -> refreshBugs());
             aiFixAllButton.addActionListener(event -> aiFixAll());
             projectBox.addActionListener(event -> {
+                if (hydratingProjects) return;
+                preferredMemberAccount = "";
+                if (memberBox.getItemCount() > 0) memberBox.setSelectedIndex(0);
                 savePreferences();
                 refreshBugs();
             });
             memberBox.addActionListener(event -> {
+                if (hydratingMembers) return;
                 savePreferences();
                 currentPage = 1;
                 renderBugs();
@@ -266,35 +286,54 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }, message -> {
                 loginState.setText(message);
                 loginButton.setText("重新登录");
-                loadProjects(false);
+                loadProjectsAfterLogin(false);
             });
         }
 
+        private void loadProjectsAfterLogin(boolean force) {
+            loadProjects(force, () -> loadMembers(false, () ->
+                    statusArea.setText("状态：登录成功，项目 " + projects.size() + " 个，成员 " + members.size() + " 个。请选择项目拉取 Bug。")
+            ));
+        }
+
         private void loadProjects(boolean force) {
+            loadProjects(force, null);
+        }
+
+        private void loadProjects(boolean force, Runnable afterLoaded) {
             if (!force && !projects.isEmpty()) {
-                refreshBugs();
+                statusArea.setText("状态：项目列表已缓存：" + projects.size() + " 个");
+                if (afterLoaded != null) afterLoaded.run();
                 return;
             }
             runAsync("正在获取项目列表...", client::listProjects, items -> {
                 projects.clear();
                 projects.addAll(items);
-                projectBox.removeAllItems();
-                for (Item item : projects) projectBox.addItem(item);
-                selectItem(projectBox, preferredProjectId);
+                populateProjectBox();
                 savePreferences();
-                refreshBugs();
+                statusArea.setText(items.isEmpty() ? "状态：项目列表为空，请检查禅道权限或项目入口。" : "状态：项目列表已加载：" + items.size() + " 个");
+                if (afterLoaded != null) afterLoaded.run();
             });
         }
 
         private void loadMembers(boolean force) {
-            if (!force && !members.isEmpty()) return;
+            loadMembers(force, null);
+        }
+
+        private void loadMembers(boolean force, Runnable afterLoaded) {
+            if (!force && !members.isEmpty()) {
+                statusArea.setText("状态：成员列表已缓存：" + members.size() + " 个");
+                if (afterLoaded != null) afterLoaded.run();
+                return;
+            }
             runAsync("正在获取成员列表...", () -> client.listMembers(selectedProjectId()), items -> {
                 members.clear();
                 members.addAll(items);
-                memberBox.removeAllItems();
-                for (Item item : members) memberBox.addItem(item);
-                selectItem(memberBox, preferredMemberAccount);
+                populateMemberBox();
                 savePreferences();
+                renderBugs();
+                statusArea.setText(items.isEmpty() ? "状态：成员列表为空，请先选择项目或检查禅道权限。" : "状态：成员列表已加载：" + items.size() + " 个");
+                if (afterLoaded != null) afterLoaded.run();
             });
         }
 
@@ -347,6 +386,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             properties.setValue("zentao.idea.password", rememberPasswordBox.isSelected() ? new String(passwordField.getPassword()) : "", "");
             properties.setValue("zentao.idea.projectId", selectedProjectId(), "");
             properties.setValue("zentao.idea.memberAccount", selectedMemberAccount(), "");
+            properties.setValue("zentao.idea.projects", encodeItems(projects), "");
+            properties.setValue("zentao.idea.members", encodeItems(members), "");
             properties.setValue("zentao.idea.filters", String.join(",", selectedFilterKeys()), String.join(",", FILTER_KEYS));
         }
 
@@ -358,9 +399,53 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
             passwordField.setText(properties.getValue("zentao.idea.password", ""));
             preferredProjectId = properties.getValue("zentao.idea.projectId", "");
-            preferredMemberAccount = properties.getValue("zentao.idea.memberAccount", "");
+            preferredMemberAccount = "";
+            projects.clear();
+            projects.addAll(decodeItems(properties.getValue("zentao.idea.projects", "")));
+            members.clear();
+            members.addAll(decodeItems(properties.getValue("zentao.idea.members", "")));
+            populateProjectBox();
+            populateMemberBox();
             Set<String> filters = new LinkedHashSet<>(List.of(properties.getValue("zentao.idea.filters", String.join(",", FILTER_KEYS)).split(",")));
             filterChecks.forEach((key, box) -> box.setSelected(filters.contains(key)));
+            refreshAllFilterState();
+        }
+
+        private void populateProjectBox() {
+            hydratingProjects = true;
+            projectBox.removeAllItems();
+            projectBox.addItem(new Item("", "全部项目"));
+            for (Item item : projects) projectBox.addItem(item);
+            selectItem(projectBox, preferredProjectId);
+            hydratingProjects = false;
+        }
+
+        private void populateMemberBox() {
+            hydratingMembers = true;
+            memberBox.removeAllItems();
+            memberBox.addItem(new Item("", "全部成员"));
+            for (Item item : members) memberBox.addItem(item);
+            selectItem(memberBox, preferredMemberAccount);
+            hydratingMembers = false;
+        }
+
+        private static String encodeItems(List<Item> values) {
+            return values.stream()
+                    .map(item -> item.id.replace("\t", " ").replace("\n", " ") + "\t" + item.name.replace("\t", " ").replace("\n", " "))
+                    .reduce((a, b) -> a + "\n" + b)
+                    .orElse("");
+        }
+
+        private static List<Item> decodeItems(String value) {
+            if (value == null || value.isBlank()) return List.of();
+            List<Item> result = new ArrayList<>();
+            for (String line : value.split("\n")) {
+                String[] parts = line.split("\t", 2);
+                if (parts.length == 2 && !parts[0].isBlank() && !parts[1].isBlank()) {
+                    result.add(new Item(parts[0], parts[1]));
+                }
+            }
+            return result;
         }
 
         private List<String> selectedFilterKeys() {
@@ -369,6 +454,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (box.isSelected()) keys.add(key);
             });
             return keys;
+        }
+
+        private void refreshAllFilterState() {
+            hydratingFilters = true;
+            boolean allSelected = filterChecks.values().stream().filter(JCheckBox::isEnabled).allMatch(JCheckBox::isSelected);
+            allFilterBox.setSelected(allSelected);
+            hydratingFilters = false;
         }
 
         private void renderBugs() {
@@ -437,6 +529,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 mine.setSelected(false);
             }
             mine.setEnabled(!disabled);
+            refreshAllFilterState();
         }
 
         private boolean isMineFilterDisabled() {
@@ -472,7 +565,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void aiFixAll() {
-            for (BugSummary bug : unresolved(filteredBugs())) aiFix(bug.id);
+            List<BugSummary> targets = unresolved(filteredBugs());
+            if (targets.isEmpty()) return;
+            runAsync("正在构建 " + targets.size() + " 个 Bug 的批量修复提示词...", () -> {
+                List<BugDetail> details = new ArrayList<>();
+                for (BugSummary bug : targets) {
+                    details.add(client.getBugDetail(bug.id));
+                }
+                return details;
+            }, details -> {
+                String prompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
+                sendToClaudeCode(prompt);
+                statusArea.setText("状态：" + details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
+            });
         }
 
         private void aiFix(String bugId) {
@@ -491,18 +596,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void submitWorkflow(String bugId, String action) {
             String title = switch (action) {
-                case "assignTo" -> "指派";
-                case "confirmBug" -> "确认";
+                case "assign" -> "指派";
+                case "confirm" -> "确认";
                 case "resolve" -> "解决";
                 case "activate" -> "激活";
                 default -> action;
             };
             String assignee = "";
-            if (action.equals("assignTo")) {
+            if (action.equals("assign")) {
                 assignee = Messages.showInputDialog(project, "请输入要指派给的禅道账号：", "禅道助手 - 指派", null);
                 if (assignee == null || assignee.isBlank()) return;
             }
-            String comment = Messages.showInputDialog(project, title + " Bug #" + bugId + "，可填写备注：", "禅道助手 - " + title, null);
+            String defaultComment = action.equals("resolve") ? "已修复，请验证。" : action.equals("activate") ? "重新激活，请继续处理。" : "";
+            String comment = Messages.showInputDialog(project, title + " Bug #" + bugId + "，可填写备注：", "禅道助手 - " + title, null, defaultComment, null);
             if (comment == null) return;
             String finalAssignee = assignee;
             runAsync("正在" + title + " Bug #" + bugId + "...", () -> {
@@ -578,10 +684,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 buttons.add(preview);
                 if (!bug.status.equals("resolved") && !bug.status.equals("closed")) {
                     JButton assign = new JButton("指派");
-                    assign.addActionListener(event -> submitWorkflow(bug.id, "assignTo"));
+                    assign.addActionListener(event -> submitWorkflow(bug.id, "assign"));
                     buttons.add(assign);
                     JButton confirm = new JButton("确认");
-                    confirm.addActionListener(event -> submitWorkflow(bug.id, "confirmBug"));
+                    confirm.addActionListener(event -> submitWorkflow(bug.id, "confirm"));
                     buttons.add(confirm);
                     JButton resolve = new JButton("解决");
                     resolve.addActionListener(event -> submitWorkflow(bug.id, "resolve"));
@@ -703,10 +809,31 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final class PromptBuilder {
             private static String build(BugDetail bug) {
                 List<String> images = extractReproduceStepImages(bug.reproduceStepsHtml).stream().limit(32).toList();
-                String imageText = images.isEmpty() ? "未提供" : images.stream().map(url -> "- " + url).reduce((a, b) -> a + "\n" + b).orElse("未提供");
+                String imageText = images.isEmpty() ? "未提供" : indexedImages(images, "");
                 String description = textOrFallback(bug.description, bug.title);
                 String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
-                return "【Bug修复任务】\nBug编号：" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText + "\n\n请在当前代码仓库中修复以上 Bug。完成后说明根因、关键修改和验证方式。";
+                return "【Bug修复任务】\nBug编号：" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText + "\n\n请在当前代码仓库中修复以上 Bug。完成后请说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+            }
+
+            private static String buildBatch(List<BugDetail> bugs) {
+                List<String> sections = new ArrayList<>();
+                for (int i = 0; i < bugs.size(); i++) {
+                    BugDetail bug = bugs.get(i);
+                    List<String> images = extractReproduceStepImages(bug.reproduceStepsHtml).stream().limit(32).toList();
+                    String imageText = images.isEmpty() ? "  未提供" : indexedImages(images, "  ");
+                    String description = textOrFallback(bug.description, bug.title);
+                    String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
+                    sections.add("## " + (i + 1) + ". Bug #" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText);
+                }
+                return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n" + String.join("\n\n---\n\n", sections) + "\n\n完成后请按 Bug 编号分别说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+            }
+
+            private static String indexedImages(List<String> images, String prefix) {
+                List<String> lines = new ArrayList<>();
+                for (int i = 0; i < images.size(); i++) {
+                    lines.add(prefix + "- 图片" + (i + 1) + "：" + images.get(i));
+                }
+                return String.join("\n", lines);
             }
 
             private static String textOrFallback(String... values) {
@@ -753,12 +880,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private static final class ZenTaoClient {
-            private final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-            private final HttpClient http = HttpClient.newBuilder().cookieHandler(cookieManager).connectTimeout(Duration.ofSeconds(10)).build();
+            private final Map<String, String> cookieJar = new LinkedHashMap<>();
+            private final HttpClient http = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .build();
             private String baseUrl = DEFAULT_SERVER;
 
             private boolean loggedIn() {
-                return !cookieManager.getCookieStore().getCookies().isEmpty();
+                return !cookieJar.isEmpty();
             }
 
             private void login(String serverUrl, String account, String password) throws Exception {
@@ -781,25 +911,54 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private List<Item> listProjects() throws Exception {
-                String html = get("index.php", Map.of("m", "product", "f", "all"), true) + "\n" + get("index.php", Map.of("m", "product", "f", "ajaxGetDropMenu", "objectID", "0", "module", "bug", "method", "browse"), true);
+                List<String> pages = new ArrayList<>();
+                List<Map<String, String>> seedParams = List.of(
+                        Map.of("m", "bug", "f", "browse"),
+                        Map.of("m", "bug", "f", "browse", "productID", "0"),
+                        Map.of("m", "product", "f", "browse"),
+                        Map.of("m", "product", "f", "all")
+                );
+                for (Map<String, String> params : seedParams) {
+                    pages.add(get("index.php", params, false));
+                }
+                Set<String> productIds = new LinkedHashSet<>();
+                productIds.add("0");
+                for (String page : pages) productIds.addAll(extractProductIds(page));
+                for (String productId : productIds) {
+                    pages.add(get("index.php", Map.of("m", "product", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse"), true));
+                    pages.add(get("index.php", Map.of("m", "product", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse", "extra", ""), true));
+                    pages.add(get("index.php", Map.of("m", "project", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse"), true));
+                    pages.add(get("index.php", Map.of("m", "program", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse"), true));
+                }
+                String html = String.join("\n", pages);
                 Map<String, Item> result = new LinkedHashMap<>();
                 for (String link : matches(html, "<a\\b[^>]*>[\\s\\S]*?</a>")) {
-                    String href = attr(link, "href") + " " + attr(link, "data-url") + " " + attr(link, "onclick");
-                    Matcher matcher = Pattern.compile("productID[=/](\\d+)|productid[=/](\\d+)").matcher(href);
-                    if (matcher.find()) {
-                        String id = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
-                        String name = htmlText(link);
-                        if (!name.isBlank()) result.put(id, new Item(id, name));
-                    }
+                    String href = attr(link, "href") + " " + attr(link, "data-url") + " " + attr(link, "data-href") + " " + attr(link, "onclick");
+                    String id = readProjectIdFromText(href);
+                    if (id.isBlank()) id = readProjectIdFromAttrs(link);
+                    String name = htmlText(link);
+                    if (!id.isBlank() && !name.isBlank() && !isIgnoredProjectName(name)) result.put(id, new Item(id, name));
+                }
+                for (String item : matches(html, "<(?:li|div|span|button)\\b[^>]*(?:data-(?:id|key|value|url|href)=[\"'][^\"']+[\"'])[^>]*>[\\s\\S]*?</(?:li|div|span|button)>")) {
+                    String id = readProjectIdFromAttrs(item);
+                    if (id.isBlank()) id = readProjectIdFromText(attr(item, "data-url") + " " + attr(item, "data-href") + " " + attr(item, "onclick"));
+                    String name = htmlText(item);
+                    if (!id.isBlank() && !name.isBlank() && !isIgnoredProjectName(name)) result.put(id, new Item(id, name));
                 }
                 return new ArrayList<>(result.values());
             }
 
             private List<Item> listMembers(String projectId) throws Exception {
-                List<BugSummary> bugRows = listBugs(projectId, "all", "", "");
                 Map<String, Item> result = new LinkedHashMap<>();
+                for (MemberSource source : memberSources(projectId)) {
+                    String html = get(source.path, source.params, source.ajax);
+                    for (Item item : parseMemberOptionsFromSelects(html)) result.put(item.id, item);
+                    for (Item item : parseMembersFromTeamTable(html)) result.put(item.id, item);
+                }
+                List<BugSummary> bugRows = listBugs(projectId, "all", "", "");
                 for (BugSummary bug : bugRows) if (!bug.assignedTo.isBlank()) result.put(bug.assignedTo, new Item(bug.assignedTo, bug.assignedTo));
-                return new ArrayList<>(result.values());
+                Collator collator = Collator.getInstance(Locale.CHINA);
+                return result.values().stream().sorted((left, right) -> collator.compare(left.name, right.name)).toList();
             }
 
             private List<BugSummary> listBugs(String projectId, String scope, String assignee, String account) throws Exception {
@@ -829,18 +988,29 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private void submitWorkflow(String bugId, String action, String assignee, String comment) throws Exception {
-                String formHtml = get("index.php", Map.of("m", "bug", "f", action, "bugID", bugId, "onlybody", "yes"), false);
+                String endpoint = switch (action) {
+                    case "assign" -> "assignTo";
+                    case "confirm" -> "confirmBug";
+                    default -> action;
+                };
+                String formHtml = get("index.php", Map.of("m", "bug", "f", endpoint, "bugID", bugId, "onlybody", "yes"), false);
                 Map<String, String> form = readFormInputs(formHtml);
-                form.put("comment", comment == null ? "" : comment);
-                if (action.equals("assignTo")) {
+                String safeComment = comment == null ? "" : comment;
+                form.put("comment", safeComment);
+                form.put("remark", safeComment);
+                form.put("comment[]", safeComment);
+                form.putIfAbsent("mailto", "");
+                if (action.equals("assign")) {
                     form.put("assignedTo", assignee);
+                    form.put("assignedTo[]", assignee);
                 } else if (action.equals("resolve")) {
-                    form.putIfAbsent("resolution", "fixed");
-                    form.putIfAbsent("resolvedBuild", "trunk");
-                } else if (action.equals("confirmBug")) {
-                    form.putIfAbsent("confirmed", "1");
+                    form.put("resolution", "fixed");
+                    form.put("resolvedBuild", "trunk");
+                    form.put("resolvedDate", formatZenTaoDate(new java.util.Date()));
+                } else if (action.equals("confirm")) {
+                    form.put("confirmed", "1");
                 }
-                String body = post("index.php?m=bug&f=" + action + "&bugID=" + enc(bugId), form);
+                String body = post("index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId), form);
                 if (body.contains("\"result\":\"fail\"") || body.contains("error")) {
                     throw new IllegalStateException("禅道未接受该工作流提交，请在网页确认必填字段。");
                 }
@@ -848,9 +1018,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private List<BugSummary> parseBugs(String html, String assignedTo) {
                 List<String> rows = matches(html, "<tr\\b[\\s\\S]*?</tr>");
-                List<String> header = rows.stream().filter(row -> htmlText(row).contains("Bug标题")).findFirst().map(row -> matches(row, "<t[dh]\\b[\\s\\S]*?</t[dh]>").stream().map(ZenTaoClient::htmlText).toList()).orElse(List.of());
+                List<String> header = rows.stream().filter(row -> htmlText(row).matches(".*(Bug标题|标题|指派给|创建者|提交者).*")).findFirst().map(row -> matches(row, "<t[dh]\\b[\\s\\S]*?</t[dh]>").stream().map(ZenTaoClient::htmlText).toList()).orElse(List.of());
                 int titleIndex = indexOf(header, "Bug标题|标题");
-                int openedIndex = indexOf(header, "创建者|提交者");
+                int openedIndex = indexOf(header, "创建者|由谁创建|提交者");
                 int createdIndex = indexOf(header, "创建日期|创建时间");
                 int assignedIndex = indexOf(header, "指派给");
                 List<BugSummary> result = new ArrayList<>();
@@ -858,27 +1028,100 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).toList();
                     String id = cells.stream().filter(cell -> cell.matches("#?\\d+")).findFirst().orElse("").replace("#", "");
                     if (id.isBlank()) continue;
+                    String bugLink = matches(row, "<a\\b[^>]*href=[\"'][^\"']*(?:m=bug[^\"']*f=view|bug[-/]view|bug-view)[^\"']*[\"'][^>]*>[\\s\\S]*?</a>").stream().findFirst().orElse("");
+                    String linkText = htmlText(bugLink);
                     String title = cell(cells, titleIndex);
-                    if (title.isBlank() || title.matches("#?\\d+")) title = cells.stream().filter(cell -> cell.length() > 4 && !cell.matches("\\d+")).findFirst().orElse("Bug #" + id);
+                    if (title.isBlank() || title.matches("#?\\d+")) title = !linkText.isBlank() && !linkText.equals(id) && !linkText.matches("#?\\d+") ? linkText : cells.stream().filter(cell -> isLikelyBugTitleCell(cell, id)).findFirst().orElse("Bug #" + id);
                     result.add(new BugSummary(id, title, parsePriority(String.join(" ", cells)), parseStatus(String.join(" ", cells)), cell(cells, createdIndex), cell(cells, assignedIndex).isBlank() ? assignedTo : cell(cells, assignedIndex), cell(cells, openedIndex)));
                 }
-                return result;
+                Map<String, BugSummary> deduped = new LinkedHashMap<>();
+                for (BugSummary bug : result) deduped.putIfAbsent(bug.id, bug);
+                return new ArrayList<>(deduped.values());
             }
 
             private List<Map<String, String>> bugParams(String projectId, String assignedTo) {
                 Map<String, String> base = new LinkedHashMap<>();
                 base.put("m", "bug");
                 base.put("f", "browse");
-                if (!projectId.isBlank()) base.put("productID", projectId);
+                if (projectId != null && !projectId.isBlank()) base.put("productID", projectId);
                 if (!assignedTo.isBlank()) base.put("assignedTo", assignedTo);
                 List<Map<String, String>> result = new ArrayList<>();
                 result.add(base);
-                Map<String, String> browser = new LinkedHashMap<>(base);
-                browser.remove("productID");
-                browser.put("productid", projectId);
-                browser.put("branch", "all");
-                browser.put("browseType", "unresolved");
-                result.add(browser);
+                if (projectId != null && !projectId.isBlank()) {
+                    Map<String, String> browser = new LinkedHashMap<>(base);
+                    browser.remove("productID");
+                    browser.put("productid", projectId);
+                    browser.put("branch", "all");
+                    browser.put("browseType", "unresolved");
+                    result.add(browser);
+                    Map<String, String> unresolvedUpper = new LinkedHashMap<>(base);
+                    unresolvedUpper.put("branch", "all");
+                    unresolvedUpper.put("browseType", "unresolved");
+                    result.add(unresolvedUpper);
+                    Map<String, String> bySearchLower = new LinkedHashMap<>(browser);
+                    bySearchLower.put("browseType", "bySearch");
+                    result.add(bySearchLower);
+                }
+                for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
+                    Map<String, String> next = new LinkedHashMap<>(base);
+                    next.put("browseType", type);
+                    result.add(next);
+                }
+                Map<String, String> ordered = new LinkedHashMap<>(base);
+                ordered.put("browseType", "all");
+                ordered.put("param", "0");
+                ordered.put("orderBy", "id_desc");
+                result.add(ordered);
+                return dedupeParams(result);
+            }
+
+            private static boolean isLikelyBugTitleCell(String value, String id) {
+                if (value == null || value.isBlank() || value.equals(id) || value.matches("#?\\d+")) return false;
+                if (value.matches("(?i)一般|严重|致命|建议|激活|已解决|关闭|未确认|已确认|未知|高|中|低")) return false;
+                if (value.matches("\\d{2}-\\d{2}(?:\\s+\\d{2}:\\d{2})?|\\d{4}-\\d{2}-\\d{2}.*")) return false;
+                return value.length() > 4;
+            }
+
+            private static List<Map<String, String>> dedupeParams(List<Map<String, String>> values) {
+                Set<String> seen = new LinkedHashSet<>();
+                List<Map<String, String>> result = new ArrayList<>();
+                for (Map<String, String> value : values) {
+                    String key = value.entrySet().stream().sorted(Map.Entry.comparingByKey()).map(entry -> entry.getKey() + "=" + entry.getValue()).reduce((a, b) -> a + "&" + b).orElse("");
+                    if (seen.add(key)) result.add(value);
+                }
+                return result;
+            }
+
+            private static List<MemberSource> memberSources(String projectId) {
+                List<MemberSource> result = new ArrayList<>();
+                for (Map<String, String> params : bugParamsStatic(projectId, "")) {
+                    result.add(new MemberSource("index.php", params, false));
+                    if (params.containsKey("productID")) {
+                        Map<String, String> lower = new LinkedHashMap<>(params);
+                        lower.put("productid", lower.remove("productID"));
+                        lower.put("branch", "all");
+                        lower.put("browseType", "unresolved");
+                        result.add(new MemberSource("index.php", lower, false));
+                    }
+                }
+                if (projectId != null && !projectId.isBlank()) {
+                    result.add(new MemberSource("index.php", Map.of("m", "bug", "f", "create", "productID", projectId), false));
+                    result.add(new MemberSource("index.php", Map.of("m", "bug", "f", "create", "productID", projectId, "branch", "0", "moduleID", "0"), false));
+                    result.add(new MemberSource("index.php", Map.of("m", "product", "f", "team", "productID", projectId), false));
+                    result.add(new MemberSource("index.php", Map.of("m", "project", "f", "team", "projectID", projectId), false));
+                    result.add(new MemberSource("index.php", Map.of("m", "execution", "f", "team", "executionID", projectId), false));
+                }
+                return dedupeMemberSources(result);
+            }
+
+            private static List<Map<String, String>> bugParamsStatic(String projectId, String assignedTo) {
+                Map<String, String> base = new LinkedHashMap<>();
+                base.put("m", "bug");
+                base.put("f", "browse");
+                if (projectId != null && !projectId.isBlank()) base.put("productID", projectId);
+                if (assignedTo != null && !assignedTo.isBlank()) base.put("assignedTo", assignedTo);
+                List<Map<String, String>> result = new ArrayList<>();
+                result.add(base);
                 for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
                     Map<String, String> next = new LinkedHashMap<>(base);
                     next.put("browseType", type);
@@ -887,14 +1130,150 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return result;
             }
 
+            private static List<MemberSource> dedupeMemberSources(List<MemberSource> values) {
+                Set<String> seen = new LinkedHashSet<>();
+                List<MemberSource> result = new ArrayList<>();
+                for (MemberSource value : values) {
+                    String key = value.path + "?" + value.params.entrySet().stream().sorted(Map.Entry.comparingByKey()).map(entry -> entry.getKey() + "=" + entry.getValue()).reduce((a, b) -> a + "&" + b).orElse("");
+                    if (seen.add(key)) result.add(value);
+                }
+                return result;
+            }
+
+            private static List<Item> parseMemberOptionsFromSelects(String html) {
+                String names = "assignedTo|assignedTo\\[\\]|openedBy|resolvedBy|closedBy|confirmedBy|lastEditedBy";
+                List<Item> result = new ArrayList<>();
+                for (String select : matches(html, "<select\\b[^>]*\\bname=[\"'](?:" + names + ")[\"'][^>]*>[\\s\\S]*?</select>")) {
+                    for (String option : matches(select, "<option\\b[^>]*>[\\s\\S]*?</option>")) {
+                        String account = attr(option, "value").trim();
+                        String name = htmlText(option).trim();
+                        if (!account.isBlank() && !name.isBlank() && !account.matches("(?i)all|0|closed|ditto") && !name.matches("全部|所有|选择|空|无|closed")) {
+                            result.add(new Item(account, name.equals(account) ? account : name + " (" + account + ")"));
+                        }
+                    }
+                }
+                return result;
+            }
+
+            private static List<Item> parseMembersFromTeamTable(String html) {
+                Map<String, Item> result = new LinkedHashMap<>();
+                for (String row : matches(html, "<tr\\b[\\s\\S]*?</tr>")) {
+                    String text = htmlText(row);
+                    if (!text.matches("(?is).*(账号|用户名|真实姓名|成员|realname|account).*") && matches(row, "<td\\b[\\s\\S]*?</td>").isEmpty()) continue;
+                    for (String link : matches(row, "<a\\b[^>]*>[\\s\\S]*?</a>")) {
+                        String account = readUserAccount(link);
+                        String name = htmlText(link);
+                        if (!account.isBlank() && !name.isBlank() && !isIgnoredMember(account, name)) {
+                            result.put(account, new Item(account, name.equals(account) ? account : name + " (" + account + ")"));
+                        }
+                    }
+                    List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).toList();
+                    for (String cell : cells) {
+                        if (cell.matches("[A-Za-z][A-Za-z0-9_.-]{1,40}") && !isIgnoredMember(cell, cell)) {
+                            result.putIfAbsent(cell, new Item(cell, cell));
+                        }
+                    }
+                }
+                return new ArrayList<>(result.values());
+            }
+
+            private static String readUserAccount(String html) {
+                String href = attr(html, "href");
+                for (String name : List.of("account", "userID", "assignedTo")) {
+                    Matcher matcher = Pattern.compile("[?&]" + Pattern.quote(name) + "=([^&#]+)", Pattern.CASE_INSENSITIVE).matcher(href);
+                    if (matcher.find()) return urlDecode(matcher.group(1));
+                }
+                for (String name : List.of("data-account", "data-user", "data-id", "data-value")) {
+                    String value = attr(html, name);
+                    if (!value.isBlank()) return value;
+                }
+                String text = htmlText(html);
+                return text.matches("[A-Za-z][A-Za-z0-9_.-]{1,40}") ? text : "";
+            }
+
+            private static boolean isIgnoredMember(String account, String name) {
+                return account.matches("(?i)all|0|closed|ditto|admin|guest") || name.matches("全部|所有|选择|空|无|closed");
+            }
+
+            private static List<String> extractProductIds(String html) {
+                Set<String> result = new LinkedHashSet<>();
+                Matcher matcher = Pattern.compile("(?:productID|productid)[=/](\\d+)|(?:bug|product)[-/]browse[-/](\\d+)|data-(?:id|key|value)=[\"'](\\d+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html == null ? "" : html);
+                while (matcher.find()) {
+                    for (int i = 1; i <= matcher.groupCount(); i++) {
+                        if (matcher.group(i) != null) result.add(matcher.group(i));
+                    }
+                }
+                return new ArrayList<>(result);
+            }
+
+            private static String readProjectIdFromText(String value) {
+                Matcher matcher = Pattern.compile("(?:productID|productid|product|objectID)\\D{0,12}(\\d+)|(?:bug|product)[-/]browse[-/](\\d+)", Pattern.CASE_INSENSITIVE).matcher(value == null ? "" : value);
+                if (!matcher.find()) return "";
+                return matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+            }
+
+            private static String readProjectIdFromAttrs(String tag) {
+                for (String name : List.of("data-id", "data-key", "data-value", "objectID", "productID", "productid")) {
+                    String value = attr(tag, name);
+                    if (value.matches("\\d+")) return value;
+                    String id = readProjectIdFromText(value);
+                    if (!id.isBlank()) return id;
+                }
+                return "";
+            }
+
+            private static boolean isIgnoredProjectName(String name) {
+                return name == null || name.matches("(?i)关闭|closed|more|更多|全部项目|all|搜索");
+            }
+
             private String get(String path, Map<String, String> params, boolean ajax) throws Exception {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(Duration.ofSeconds(15)).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
                 if (ajax) builder.header("X-Requested-With", "XMLHttpRequest");
-                return http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body();
+                addCookieHeader(builder);
+                HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                mergeSetCookie(response);
+                if (response.statusCode() < 200 || response.statusCode() >= 400) throw new IllegalStateException("禅道请求失败：HTTP " + response.statusCode());
+                String body = response.body();
+                String decoded = decodeJsonHtml(body);
+                if (isLoginExpired(body) || isLoginExpired(decoded)) throw new IllegalStateException("禅道登录已超时，请重新登录。");
+                return decoded;
             }
 
             private String post(String path, Map<String, String> form) throws Exception {
-                return http.send(HttpRequest.newBuilder(buildUri(path, Map.of())).timeout(Duration.ofSeconds(15)).POST(HttpRequest.BodyPublishers.ofString(encode(form))).header("Content-Type", "application/x-www-form-urlencoded").header("X-Requested-With", "XMLHttpRequest").build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body();
+                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, Map.of()))
+                        .timeout(Duration.ofSeconds(15))
+                        .POST(HttpRequest.BodyPublishers.ofString(encode(form)))
+                        .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .header("Origin", baseUrl.replaceFirst("/$", ""))
+                        .header("Referer", buildUri("index.php?m=user&f=login", Map.of()).toString())
+                        .header("X-Requested-With", "XMLHttpRequest");
+                addCookieHeader(builder);
+                HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                mergeSetCookie(response);
+                if (response.statusCode() < 200 || response.statusCode() >= 400) throw new IllegalStateException("禅道请求失败：HTTP " + response.statusCode());
+                return response.body();
+            }
+
+            private void addCookieHeader(HttpRequest.Builder builder) {
+                String cookie = cookieJar.entrySet().stream().map(entry -> entry.getKey() + "=" + entry.getValue()).reduce((a, b) -> a + "; " + b).orElse("");
+                if (!cookie.isBlank()) builder.header("Cookie", cookie);
+            }
+
+            private void mergeSetCookie(HttpResponse<?> response) {
+                for (String header : response.headers().allValues("set-cookie")) {
+                    for (String cookie : header.split(",(?=\\s*[^;,]+=)")) {
+                        String pair = cookie.split(";", 2)[0].trim();
+                        if (pair.isBlank()) continue;
+                        String[] parts = pair.split("=", 2);
+                        if (parts.length == 0 || parts[0].isBlank()) continue;
+                        if (parts.length == 1 || parts[1].isBlank()) {
+                            cookieJar.remove(parts[0]);
+                        } else {
+                            cookieJar.put(parts[0], parts[1]);
+                        }
+                    }
+                }
             }
 
             private URI buildUri(String path, Map<String, String> params) {
@@ -913,6 +1292,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private static String enc(String value) {
                 return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8);
+            }
+
+            private static String urlDecode(String value) {
+                return URLDecoder.decode(value == null ? "" : value, StandardCharsets.UTF_8);
+            }
+
+            private static String formatZenTaoDate(java.util.Date value) {
+                return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(value);
             }
 
             private static String md5(String value) throws Exception {
@@ -938,6 +1325,46 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private static boolean isLoginExpired(String html) {
                 return html.contains("登录已超时") || html.contains("重新登录");
+            }
+
+            private static String decodeJsonHtml(String value) {
+                if (value == null) return "";
+                String trimmed = value.trim();
+                if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && !trimmed.startsWith("\"")) return value;
+                List<String> strings = new ArrayList<>();
+                Matcher matcher = Pattern.compile("\"((?:\\\\.|[^\"\\\\])*)\"").matcher(trimmed);
+                while (matcher.find()) {
+                    strings.add(decodeJsonString(matcher.group(1)));
+                }
+                return strings.isEmpty() ? value : String.join("\n", strings);
+            }
+
+            private static String decodeJsonString(String value) {
+                StringBuilder builder = new StringBuilder();
+                for (int i = 0; i < value.length(); i++) {
+                    char ch = value.charAt(i);
+                    if (ch != '\\' || i + 1 >= value.length()) {
+                        builder.append(ch);
+                        continue;
+                    }
+                    char next = value.charAt(++i);
+                    switch (next) {
+                        case 'n' -> builder.append('\n');
+                        case 'r' -> builder.append('\r');
+                        case 't' -> builder.append('\t');
+                        case 'b' -> builder.append('\b');
+                        case 'f' -> builder.append('\f');
+                        case '"', '\\', '/' -> builder.append(next);
+                        case 'u' -> {
+                            if (i + 4 < value.length()) {
+                                builder.append((char) Integer.parseInt(value.substring(i + 1, i + 5), 16));
+                                i += 4;
+                            }
+                        }
+                        default -> builder.append(next);
+                    }
+                }
+                return builder.toString();
             }
 
             private static String text(String value) {
@@ -1079,6 +1506,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private record DetailSections(String descriptionHtml, String reproduceStepsHtml, String expectedResultHtml) {}
             private record Marker(int index, int end) {}
+            private record MemberSource(String path, Map<String, String> params, boolean ajax) {}
 
             private static List<Attachment> parseAttachments(String html) {
                 List<Attachment> result = new ArrayList<>();

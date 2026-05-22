@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import {
+  buildBatchBugFixPrompt,
   buildBugFixPrompt,
   type AiEngine,
   type BugAssigneeScope,
@@ -130,7 +131,11 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       await this.context.secrets.store("zentao.password", password);
       this.startSessionKeepAlive("manual-login");
       await this.loadProjects();
-      await this.refresh();
+      await this.loadMembers(false);
+      this.state.bugs = [];
+      this.state.selectedIds = [];
+      this.state.status = `已登录：${session.account}，已加载 ${this.state.projects.length} 个项目、${this.state.members.length} 个成员`;
+      this.postState();
     });
   }
 
@@ -292,9 +297,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       return;
     }
 
-    for (const id of ids) {
-      await this.fixBug(id);
-    }
+    await this.fixBugsInOneChat(ids);
   }
 
   async copyProjectDebugInfo(): Promise<void> {
@@ -325,6 +328,23 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       if (this.config.get<boolean>("autoSyncAfterFix")) {
         await this.askAndSyncWorkflow(id);
       }
+    });
+  }
+
+  private async fixBugsInOneChat(ids: string[]): Promise<void> {
+    if (!(await this.ensureAuthenticated())) {
+      vscode.window.showWarningMessage("请先登录禅道。");
+      return;
+    }
+
+    await this.run(`正在构建 ${ids.length} 个 Bug 的批量修复提示词...`, async () => {
+      const details = [];
+      for (const id of ids) {
+        details.push(await this.withAutoLoginRetry(() => this.client!.getBugDetail(id)));
+      }
+      const prompt = details.length === 1 ? buildBugFixPrompt(details[0]) : buildBatchBugFixPrompt(details);
+      await sendPromptToAi(prompt, this.aiEngine);
+      this.state.status = details.length === 1 ? `Bug #${details[0].id} 已发送给 AI` : `${details.length} 个 Bug 已合并发送给 AI`;
     });
   }
 
@@ -544,6 +564,8 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
     if (message.type === "selectProject") {
       this.state.selectedProjectId = message.projectId || undefined;
+      this.state.bugs = [];
+      this.state.selectedIds = [];
       await this.savePreferences();
       // #region agent log
       debugLog("P3,P4", "vscode-plugin/src/zentaoViewProvider.ts:305", "project preference saved", {
