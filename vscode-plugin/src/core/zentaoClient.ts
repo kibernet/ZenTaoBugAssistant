@@ -438,40 +438,45 @@ export class ZenTaoClient {
       f: actionEndpoint,
       bugID: request.bugId
     };
+    const formParams = { ...params, onlybody: "yes" };
 
-    try {
-      const formResponse = await this.request("index.php", {
-        method: "GET",
-        params: { ...params, onlybody: "yes" }
-      });
-      const formHtml = await formResponse.text();
-      // #region agent log
-      debugLog("W1,W2,W3,W4", "vscode-plugin/src/core/zentaoClient.ts:296", "workflow form inspected", {
-        action: request.action,
-        bugId: request.bugId,
-        endpoint: actionEndpoint,
-        formSummary: summarizeWorkflowForm(formHtml),
-        preview: compactText(formHtml).slice(0, 300)
-      });
-      // #endregion
-    } catch (error) {
-      // #region agent log
-      debugLog("W1,W2,W4", "vscode-plugin/src/core/zentaoClient.ts:307", "workflow form inspection failed", {
-        action: request.action,
-        bugId: request.bugId,
-        endpoint: actionEndpoint,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      // #endregion
+    const formResponse = await this.request("index.php", {
+      method: "GET",
+      params: formParams
+    });
+    const formHtml = await formResponse.text();
+    const form = readWorkflowFormFields(formHtml);
+    let submitForm = form;
+    if (request.action === "assign") {
+      submitForm = buildAssignWorkflowForm(form, request);
+    } else {
+      for (const [key, value] of buildWorkflowForm(request)) {
+        submitForm.set(key, value);
+      }
     }
+    const submitPath = readFormAction(formHtml) ?? "index.php";
+    // #region agent log
+    debugLog("W1,W2,W3,W4", "vscode-plugin/src/core/zentaoClient.ts:296", "workflow form inspected", {
+      action: request.action,
+      bugId: request.bugId,
+      endpoint: actionEndpoint,
+      submitPath,
+      formSummary: summarizeWorkflowForm(formHtml),
+      preview: compactText(formHtml).slice(0, 300)
+    });
+    // #endregion
 
-    const response = await this.request("index.php", {
+    const submitParams = submitPath === "index.php" ? formParams : undefined;
+    const response = await this.request(submitPath, {
       method: "POST",
-      body: buildWorkflowForm(request),
+      body: submitForm,
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
+        Referer: this.buildUrl("index.php", formParams).toString(),
+        Origin: this.buildUrl("/").origin
       },
-      params
+      params: submitParams,
+      ajax: request.action === "assign" ? false : undefined
     });
     const responseText = await response.text().catch(() => "");
     // #region agent log
@@ -479,11 +484,26 @@ export class ZenTaoClient {
       action: request.action,
       bugId: request.bugId,
       endpoint: actionEndpoint,
-      submittedFields: [...buildWorkflowForm(request).keys()],
+      submittedFields: [...submitForm.keys()],
       responseSummary: summarizeWorkflowResponse(responseText),
       preview: compactText(responseText).slice(0, 300)
     });
     // #endregion
+    await this.verifyWorkflowEffect(request, responseText);
+  }
+
+  private async verifyWorkflowEffect(request: BugWorkflowRequest, responseText: string): Promise<void> {
+    const html = await this.getText("index.php?m=bug&f=view", { bugID: request.bugId }, false);
+    const detail = parseBugDetail(html, request.bugId, this.baseUrl);
+    const ok =
+      (request.action === "assign" && matchesAssignee(detail.assignedTo, request.assignedTo, request.members)) ||
+      (request.action === "resolve" && detail.status === "resolved") ||
+      (request.action === "close" && detail.status === "closed") ||
+      (request.action === "activate" && detail.status === "active") ||
+      (request.action === "confirm" && detail.confirmed === true);
+    if (!ok) {
+      throw new Error(`禅道${workflowActionName(request.action)}后校验未生效。当前状态：${detail.status || "未知"}，当前指派：${detail.assignedTo || "未知"}。响应摘要：${compactText(responseText).slice(0, 300)}`);
+    }
   }
 
   private ensureSession(): void {
@@ -804,6 +824,68 @@ function buildWorkflowForm(request: BugWorkflowRequest): URLSearchParams {
   }
 
   return form;
+}
+
+function buildAssignWorkflowForm(source: URLSearchParams, request: BugWorkflowRequest): URLSearchParams {
+  const form = new URLSearchParams();
+  const assignedTo = request.assignedTo?.trim();
+  if (assignedTo) {
+    form.set("assignedTo", assignedTo);
+  }
+  if (source.has("status")) {
+    form.set("status", source.get("status") ?? "");
+  }
+  if (source.has("uid")) {
+    form.set("uid", source.get("uid") ?? "");
+  }
+  form.set("comment", request.comment ?? "");
+  return form;
+}
+
+function readWorkflowFormFields(html: string): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const input of matchAll(html, /<input\b[^>]*>/gi)) {
+    const name = readAttr(input, "name");
+    if (name) form.set(name, readAttr(input, "value") ?? "");
+  }
+  for (const textarea of matchAll(html, /<textarea\b[\s\S]*?<\/textarea>/gi)) {
+    const name = readAttr(textarea, "name");
+    if (name && !form.has(name)) form.set(name, htmlText(textarea));
+  }
+  for (const select of matchAll(html, /<select\b[\s\S]*?<\/select>/gi)) {
+    const name = readAttr(select, "name");
+    if (!name || form.has(name)) continue;
+    const options = matchAll(select, /<option\b[^>]*>[\s\S]*?<\/option>/gi);
+    const selected = options.find((option) => /\sselected(?:\s|=|>)/i.test(option)) ?? options[0];
+    form.set(name, selected ? readAttr(selected, "value") ?? "" : "");
+  }
+  return form;
+}
+
+function readFormAction(html: string): string | undefined {
+  const form = html.match(/<form\b[^>]*>/i)?.[0];
+  return form ? readAttr(form, "action")?.replace(/&amp;/g, "&") : undefined;
+}
+
+function containsPerson(value: string | undefined, expected: string | undefined): boolean {
+  if (!expected) return false;
+  const actual = personAliases(value);
+  const target = personAliases(expected);
+  return target.some((item) => actual.some((candidate) => candidate === item || candidate.includes(item) || item.includes(candidate)));
+}
+
+function personAliases(value: string | undefined): string[] {
+  const text = (value ?? "").trim();
+  if (!text) return [];
+  const aliases = [text, ...text.split(/[|/／,，;；]/).map((item) => item.trim())];
+  const beforeParen = text.replace(/\s*[（(].*?[）)]\s*/g, "").trim();
+  if (beforeParen) aliases.push(beforeParen);
+  for (const match of text.matchAll(/[（(]([^）)]+)[）)]/g)) aliases.push(match[1].trim());
+  return [...new Set(aliases.map((item) => item.toLowerCase()).filter(Boolean))];
+}
+
+function workflowActionName(action: BugWorkflowRequest["action"]): string {
+  return { assign: "指派", confirm: "确认", resolve: "解决", close: "关闭", activate: "激活" }[action];
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -1162,8 +1244,14 @@ function parseBugDetail(html: string, bugId: string, baseUrl: string): ZenTaoBug
     id: bugId,
     title: title || `Bug #${bugId}`,
     priority: parsePriority(text),
-    status: parseStatus(text),
+    status: parseDetailStatus(html, text, baseUrl),
     createdAt: text.match(/\d{4}-\d{2}-\d{2}/)?.[0],
+    assignedTo: firstNonBlank(
+      readDetailFieldHtml(html, ["当前指派", "指派给"], baseUrl),
+      readDetailField(text, "当前指派"),
+      readDetailField(text, "指派给")
+    ),
+    confirmed: /已确认|confirmed/i.test(text),
     description,
     descriptionHtml,
     reproduceSteps: htmlText(reproduceStepsHtml ?? "") || undefined,
@@ -1248,6 +1336,55 @@ function stripBugIdPrefix(value: string, bugId: string): string {
     .replace(new RegExp(`^(?:BUG\\s*)?#?${escapeRegExp(bugId)}(?:\\s+|\\s*[-:：#]\\s*)`, "i"), "")
     .replace(new RegExp(`^(?:BUG\\s*)?#?${escapeRegExp(bugId)}$`, "i"), "")
     .trim();
+}
+
+function readDetailField(text: string, label: string): string | undefined {
+  const pattern = new RegExp(`${label}\\s*[:：]?\\s*([^\\n\\r]+)`, "i");
+  return text.match(pattern)?.[1]?.trim();
+}
+
+function readDetailFieldHtml(html: string, labels: string[], baseUrl: string): string | undefined {
+  const value = readSectionHtml(html, labels, baseUrl);
+  return value ? normalizeDetailField(htmlText(value)) : undefined;
+}
+
+function normalizeDetailField(value: string | undefined): string | undefined {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return undefined;
+  }
+  return text.replace(/\s*于\s*\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?/g, "").trim() || undefined;
+}
+
+function parseDetailStatus(html: string, text: string, baseUrl: string): ZenTaoBugSummary["status"] {
+  const field = readDetailFieldHtml(html, ["Bug状态"], baseUrl) ?? readDetailField(text, "Bug状态");
+  return parseStatus(field || text);
+}
+
+function matchesAssignee(
+  currentAssignee: string | undefined,
+  expectedAccount: string | undefined,
+  members: BugWorkflowRequest["members"]
+): boolean {
+  if (!expectedAccount) {
+    return false;
+  }
+  if (containsPerson(currentAssignee, expectedAccount)) {
+    return true;
+  }
+  for (const member of members ?? []) {
+    if (member.account.toLowerCase() !== expectedAccount.toLowerCase() && member.name.toLowerCase() !== expectedAccount.toLowerCase()) {
+      continue;
+    }
+    if (containsPerson(currentAssignee, member.account) || containsPerson(currentAssignee, member.name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function firstNonBlank(...values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value?.trim())?.trim();
 }
 
 function readBugDescriptionHtml(html: string, baseUrl: string): string | undefined {

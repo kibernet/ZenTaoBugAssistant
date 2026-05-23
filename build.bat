@@ -1,5 +1,6 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
+chcp 65001 >nul 2>&1
 
 set "ROOT_DIR=%~dp0"
 set "ROOT_DIR=%ROOT_DIR:~0,-1%"
@@ -9,7 +10,16 @@ set "TOOLS_DIR=%ROOT_DIR%\.tools"
 set "GRADLE_VERSION=9.0.0"
 set "NODE_VERSION=20.19.0"
 
-call :main
+if /i "%~1"=="__build_intellij" (
+    call :main %*
+    exit /b %ERRORLEVEL%
+)
+if /i "%~1"=="__build_vscode" (
+    call :main %*
+    exit /b %ERRORLEVEL%
+)
+
+call :main %*
 set "BUILD_CODE=%ERRORLEVEL%"
 if not "%BUILD_CODE%"=="0" (
     echo.
@@ -23,8 +33,20 @@ pause >nul
 exit /b %BUILD_CODE%
 
 :main
-call :build_intellij || exit /b %ERRORLEVEL%
-call :build_vscode || exit /b %ERRORLEVEL%
+if /i "%~1"=="__build_intellij" (
+    call :build_intellij
+    exit /b %ERRORLEVEL%
+)
+if /i "%~1"=="__build_vscode" (
+    call :build_vscode
+    exit /b %ERRORLEVEL%
+)
+
+call :ensure_java || exit /b %ERRORLEVEL%
+call :ensure_gradle || exit /b %ERRORLEVEL%
+call :ensure_node || exit /b %ERRORLEVEL%
+
+call :build_parallel || exit /b %ERRORLEVEL%
 
 echo.
 echo ========================================
@@ -32,12 +54,105 @@ echo All builds completed successfully!
 echo ========================================
 exit /b 0
 
+:build_parallel
+echo ========================================
+echo Building IntelliJ and VS Code plugins in parallel...
+echo ========================================
+
+set "BUILD_LOG_DIR=%ROOT_DIR%\build-logs"
+if not exist "%BUILD_LOG_DIR%" mkdir "%BUILD_LOG_DIR%"
+set "INTELLIJ_EXIT=%BUILD_LOG_DIR%\intellij.exit"
+set "VSCODE_EXIT=%BUILD_LOG_DIR%\vscode.exit"
+set "INTELLIJ_LOG=%BUILD_LOG_DIR%\intellij.log"
+set "VSCODE_LOG=%BUILD_LOG_DIR%\vscode.log"
+set "INTELLIJ_CMD=%BUILD_LOG_DIR%\build-intellij.cmd"
+set "VSCODE_CMD=%BUILD_LOG_DIR%\build-vscode.cmd"
+if exist "%INTELLIJ_EXIT%" del /q "%INTELLIJ_EXIT%"
+if exist "%VSCODE_EXIT%" del /q "%VSCODE_EXIT%"
+if exist "%INTELLIJ_LOG%" del /q "%INTELLIJ_LOG%"
+if exist "%VSCODE_LOG%" del /q "%VSCODE_LOG%"
+if exist "%INTELLIJ_CMD%" del /q "%INTELLIJ_CMD%"
+if exist "%VSCODE_CMD%" del /q "%VSCODE_CMD%"
+
+>"%INTELLIJ_CMD%" echo @echo off
+>>"%INTELLIJ_CMD%" echo chcp 65001 ^>nul 2^>^&1
+>>"%INTELLIJ_CMD%" echo call "%~f0" __build_intellij ^> "%INTELLIJ_LOG%" 2^>^&1
+>>"%INTELLIJ_CMD%" echo ^> "%INTELLIJ_EXIT%" echo %%ERRORLEVEL%%
+>"%VSCODE_CMD%" echo @echo off
+>>"%VSCODE_CMD%" echo chcp 65001 ^>nul 2^>^&1
+>>"%VSCODE_CMD%" echo call "%~f0" __build_vscode ^> "%VSCODE_LOG%" 2^>^&1
+>>"%VSCODE_CMD%" echo ^> "%VSCODE_EXIT%" echo %%ERRORLEVEL%%
+
+start "ZenTao IntelliJ Build" /b cmd /c ""%INTELLIJ_CMD%""
+start "ZenTao VSCode Build" /b cmd /c ""%VSCODE_CMD%""
+
+set /a WAIT_SECONDS=0
+:wait_parallel
+if exist "%INTELLIJ_EXIT%" (
+    set "INTELLIJ_STATUS=done"
+) else (
+    set "INTELLIJ_STATUS=running"
+)
+if exist "%VSCODE_EXIT%" (
+    set "VSCODE_STATUS=done"
+) else (
+    set "VSCODE_STATUS=running"
+)
+if not "%INTELLIJ_STATUS%"=="done" (
+    call :sleep_seconds 2
+    set /a WAIT_SECONDS+=2
+    echo Still building... !WAIT_SECONDS!s elapsed. IntelliJ: !INTELLIJ_STATUS!, VS Code/Cursor: !VSCODE_STATUS!
+    goto wait_parallel
+)
+if not "%VSCODE_STATUS%"=="done" (
+    call :sleep_seconds 2
+    set /a WAIT_SECONDS+=2
+    echo Still building... !WAIT_SECONDS!s elapsed. IntelliJ: !INTELLIJ_STATUS!, VS Code/Cursor: !VSCODE_STATUS!
+    goto wait_parallel
+)
+
+set /p INTELLIJ_CODE=<"%INTELLIJ_EXIT%"
+set /p VSCODE_CODE=<"%VSCODE_EXIT%"
+
+echo.
+echo ========================================
+echo IntelliJ build output
+echo ========================================
+call :print_log "%INTELLIJ_LOG%"
+echo.
+echo ========================================
+echo VS Code/Cursor build output
+echo ========================================
+call :print_log "%VSCODE_LOG%"
+
+if not "%INTELLIJ_CODE%"=="0" (
+    echo [ERROR] IntelliJ plugin build failed with exit code %INTELLIJ_CODE%.
+    exit /b %INTELLIJ_CODE%
+)
+if not "%VSCODE_CODE%"=="0" (
+    echo [ERROR] VS Code/Cursor plugin build failed with exit code %VSCODE_CODE%.
+    exit /b %VSCODE_CODE%
+)
+exit /b 0
+
+:print_log
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath '%~1' -Encoding UTF8 | ForEach-Object { Write-Host $_ }"
+exit /b 0
+
+:sleep_seconds
+set "SLEEP_SECONDS=%~1"
+if "%SLEEP_SECONDS%"=="" set "SLEEP_SECONDS=1"
+set /a PING_COUNT=%SLEEP_SECONDS%+1
+ping -n %PING_COUNT% 127.0.0.1 >nul
+exit /b 0
+
 :build_intellij
 echo ========================================
 echo Building IntelliJ plugin...
 echo ========================================
-call :ensure_java || exit /b %ERRORLEVEL%
-call :ensure_gradle || exit /b %ERRORLEVEL%
+if not defined JAVA_HOME call :ensure_java || exit /b %ERRORLEVEL%
+where gradle >nul 2>nul
+if errorlevel 1 call :ensure_gradle || exit /b %ERRORLEVEL%
 
 pushd "%INTELLIJ_DIR%" || exit /b 1
 if exist build\distributions\*.zip del /q build\distributions\*.zip
@@ -56,7 +171,8 @@ echo.
 echo ========================================
 echo Building VS Code/Cursor plugin...
 echo ========================================
-call :ensure_node || exit /b %ERRORLEVEL%
+where npm >nul 2>nul
+if errorlevel 1 call :ensure_node || exit /b %ERRORLEVEL%
 
 pushd "%VSCODE_DIR%" || exit /b 1
 if exist "%VSCODE_DIR%\dist" rmdir /s /q "%VSCODE_DIR%\dist"

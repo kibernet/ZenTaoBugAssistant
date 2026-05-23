@@ -5,6 +5,7 @@ import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorLocation;
 import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.util.UserDataHolderBase;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.jcef.JBCefApp;
 import com.intellij.ui.jcef.JBCefBrowser;
 import java.beans.PropertyChangeListener;
@@ -57,6 +58,11 @@ final class ZenTaoPreviewFileEditor extends UserDataHolderBase implements FileEd
     @Override
     public @NotNull String getName() {
         return file.bugId().isBlank() ? "禅道 Bug 预览" : "Bug #" + file.bugId();
+    }
+
+    @Override
+    public @NotNull VirtualFile getFile() {
+        return file;
     }
 
     @Override

@@ -25,12 +25,19 @@ import com.intellij.ui.content.ContentFactory;
 import com.intellij.util.ui.JBUI;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Font;
 import java.awt.FlowLayout;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Image;
 import java.awt.Dimension;
+import java.awt.GradientPaint;
+import java.awt.RenderingHints;
 import java.awt.datatransfer.StringSelection;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
@@ -63,6 +70,8 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.SwingWorker;
+import javax.swing.border.CompoundBorder;
+import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import org.jetbrains.annotations.NotNull;
 
@@ -80,6 +89,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final int DEFAULT_KEEP_ALIVE_MINUTES = 5;
         private static final List<String> FILTER_KEYS = List.of("assignedToMe", "unresolved", "resolved", "closed");
         private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Chat", "claude-code.chat", "claudeCode.chat", "ClaudeCode.NewChat", "claude-code.newChat", "claudeCode.newChat", "ClaudeCode.Open", "claude-code.open", "claudeCode.open");
+        private static final String SUPPRESS_ERROR_POPUP_KEY = "zentao.idea.suppressErrorPopup";
 
         private final Project project;
         private final ToolWindow toolWindow;
@@ -97,7 +107,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final Map<String, JCheckBox> filterChecks = new LinkedHashMap<>();
         private final JLabel bugCountLabel = new JLabel("共 0 个 Bug");
         private final JButton refreshButton = new JButton("刷新");
-        private final JButton aiFixAllButton = new JButton("AI一键修复");
+        private final JButton aiFixAllButton = new GradientButton("✦ AI一键修复");
         private final JButton clearImageCacheButton = new JButton("清理缓存");
         private final ComboBox<String> aiEngineBox = new ComboBox<>(new String[] {"Claude Code"});
         private final JPanel bugListPanel = new JPanel();
@@ -121,6 +131,17 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private boolean hydratingProjects = false;
         private boolean hydratingMembers = false;
         private boolean hydratingFilters = false;
+        private static final Color PANEL_BG = new JBColor(new Color(245, 247, 250), new Color(35, 37, 42));
+        private static final Color TOOLBAR_BG = new JBColor(new Color(247, 248, 252), new Color(43, 45, 50));
+        private static final Color TEXT_MAIN = new JBColor(new Color(36, 40, 45), new Color(226, 229, 234));
+        private static final Color TEXT_SUB = new JBColor(new Color(108, 113, 122), new Color(149, 155, 164));
+        private static final Font BUTTON_FONT = new Font("Microsoft YaHei UI", Font.BOLD, 12);
+        private static final Color BTN_PRIMARY_BG = new Color(37, 99, 168);
+        private static final Color BTN_SECONDARY_BG = new Color(95, 99, 104);
+        private static final Color BTN_SUCCESS_BG = new Color(47, 125, 70);
+        private static final Color BTN_DANGER_BG = new Color(95, 99, 104);
+        private static final Color BTN_PURPLE_BG = new Color(124, 58, 237);
+        private static final Color BTN_TEXT = new Color(246, 248, 251);
 
         private ZenTaoBugAssistantPanel(Project project, ToolWindow toolWindow) {
             this.project = project;
@@ -128,11 +149,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             client.setPromptImageRoot(project.getBasePath());
             cleanupImageCacheOncePerDay();
             root.setBorder(JBUI.Borders.empty(10));
+            root.setBackground(PANEL_BG);
             root.add(buildTopPanel(), BorderLayout.NORTH);
             root.add(buildCenterPanel(), BorderLayout.CENTER);
             statusArea.setEditable(false);
             statusArea.setLineWrap(true);
             statusArea.setRows(2);
+            statusArea.setBackground(TOOLBAR_BG);
+            statusArea.setForeground(TEXT_SUB);
+            statusArea.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(222, 227, 238), new Color(75, 80, 89)), 1, true), JBUI.Borders.empty(8, 10)));
             root.add(statusArea, BorderLayout.SOUTH);
             applySettingsDefaults();
             restorePreferences();
@@ -149,6 +174,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private JPanel buildTopPanel() {
             JPanel top = new JPanel(new GridBagLayout());
+            top.setOpaque(true);
+            top.setBackground(TOOLBAR_BG);
+            top.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(8, 8)));
             GridBagConstraints c = new GridBagConstraints();
             c.fill = GridBagConstraints.HORIZONTAL;
             c.insets = JBUI.insets(2);
@@ -162,6 +190,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             addRow(top, c, 2, "禅道账号", accountField);
             addRow(top, c, 3, "禅道密码", passwordField);
             JPanel loginRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+            loginRow.setOpaque(false);
+            applyTopButton(loginButton, BTN_PRIMARY_BG);
             loginRow.add(autoLoginBox);
             loginRow.add(loginButton);
             loginRow.add(loginState);
@@ -171,6 +201,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             JPanel projectRow = new JPanel(new BorderLayout(6, 0));
             JButton refreshProjects = new JButton("刷新");
+            applyTopButton(refreshProjects, BTN_PRIMARY_BG);
             refreshProjects.addActionListener(event -> loadProjects(true));
             projectRow.add(projectBox, BorderLayout.CENTER);
             projectRow.add(refreshProjects, BorderLayout.EAST);
@@ -179,11 +210,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             memberBox.setEditable(true);
             memberWrap.add(memberBox, BorderLayout.CENTER);
             JButton refreshMembers = new JButton("刷新");
+            applyTopButton(refreshMembers, BTN_PRIMARY_BG);
             refreshMembers.addActionListener(event -> loadMembers(true));
             memberWrap.add(refreshMembers, BorderLayout.EAST);
             addRow(top, c, 6, "成员", memberWrap);
 
             JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+            filters.setOpaque(false);
             allFilterBox.addActionListener(event -> {
                 if (hydratingFilters) return;
                 hydratingFilters = true;
@@ -203,7 +236,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void cleanupImageCacheOncePerDay() {
-            PropertiesComponent properties = PropertiesComponent.getInstance(project);
+            PropertiesComponent properties = projectProperties();
+            if (properties == null) return;
             String today = java.time.LocalDate.now().toString();
             if (today.equals(properties.getValue("zentao.idea.lastImageCacheCleanup", ""))) return;
             client.clearPromptImages();
@@ -216,6 +250,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return new JPanel();
             }
             JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+            panel.setOpaque(false);
             ImageIcon icon = new ImageIcon(logo);
             Image scaled = icon.getImage().getScaledInstance(Math.max(1, icon.getIconWidth() / 2), Math.max(1, icon.getIconHeight() / 2), Image.SCALE_SMOOTH);
             panel.add(new JLabel(new ImageIcon(scaled)));
@@ -224,11 +259,20 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private JPanel buildCenterPanel() {
             JPanel center = new JPanel(new BorderLayout(8, 8));
+            center.setOpaque(true);
+            center.setBackground(PANEL_BG);
             JPanel bar = new JPanel(new BorderLayout(8, 0));
+            bar.setOpaque(true);
+            bar.setBackground(TOOLBAR_BG);
+            bar.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(8, 10)));
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+            actions.setOpaque(false);
             compactButton(refreshButton);
             compactButton(aiFixAllButton);
             compactButton(clearImageCacheButton);
+            applyTopButton(refreshButton, BTN_PRIMARY_BG);
+            applyPillButton(aiFixAllButton, BTN_PURPLE_BG);
+            applyPillButton(clearImageCacheButton, BTN_PRIMARY_BG);
             aiEngineBox.setPrototypeDisplayValue("Claude Code");
             actions.add(refreshButton);
             actions.add(aiFixAllButton);
@@ -236,12 +280,24 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             aiEngineBox.setEnabled(true);
             actions.add(aiEngineBox);
             bar.add(bugCountLabel, BorderLayout.WEST);
+            bugCountLabel.setForeground(TEXT_MAIN);
+            bugCountLabel.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 14));
             bar.add(actions, BorderLayout.EAST);
             center.add(bar, BorderLayout.NORTH);
             bugListPanel.setLayout(new javax.swing.BoxLayout(bugListPanel, javax.swing.BoxLayout.Y_AXIS));
+            bugListPanel.setOpaque(true);
+            bugListPanel.setBackground(PANEL_BG);
             center.add(new JBScrollPane(bugListPanel), BorderLayout.CENTER);
             JPanel pager = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+            pager.setOpaque(true);
+            pager.setBackground(TOOLBAR_BG);
+            pager.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(6, 8)));
             pager.add(new JLabel("每页 20 项"));
+            applyTopButton(firstPageButton, BTN_SECONDARY_BG);
+            applyTopButton(prevPageButton, BTN_SECONDARY_BG);
+            applyTopButton(nextPageButton, BTN_SECONDARY_BG);
+            applyTopButton(lastPageButton, BTN_SECONDARY_BG);
+            pageLabel.setForeground(TEXT_MAIN);
             pager.add(firstPageButton);
             pager.add(prevPageButton);
             pager.add(pageLabel);
@@ -253,6 +309,35 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void compactButton(JButton button) {
             button.setMargin(JBUI.insets(2, 8));
+        }
+
+        private void applyPillButton(JButton button, Color background) {
+            button.setFocusPainted(false);
+            button.setOpaque(!(button instanceof GradientButton));
+            button.setBorderPainted(false);
+            button.setContentAreaFilled(!(button instanceof GradientButton));
+            button.setBackground(background);
+            button.setForeground(BTN_TEXT);
+            button.setFont(BUTTON_FONT);
+            button.setBorder(new CompoundBorder(new LineBorder(background.darker(), 1, true), new EmptyBorder(4, 12, 4, 12)));
+            button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        }
+
+        private void applyTopButton(JButton button, Color background) {
+            button.setFocusPainted(false);
+            button.setOpaque(true);
+            button.setBorderPainted(false);
+            button.setContentAreaFilled(true);
+            button.setBackground(background);
+            button.setForeground(BTN_TEXT);
+            button.setFont(BUTTON_FONT);
+            button.setBorder(new CompoundBorder(new LineBorder(background.darker(), 1, false), new EmptyBorder(4, 10, 4, 10)));
+            button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        }
+
+        private void applyCardButton(JButton button, Color background) {
+            applyTopButton(button, background);
+            button.setBorder(new CompoundBorder(new LineBorder(background.brighter(), 1, false), new EmptyBorder(3, 10, 3, 10)));
         }
 
         private void addRow(JPanel panel, GridBagConstraints c, int y, String label, JComponent component) {
@@ -267,6 +352,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void addFilter(JPanel filters, String key, String text) {
             JCheckBox box = new JCheckBox(text, true);
+            box.setOpaque(false);
+            box.setForeground(TEXT_SUB);
             box.addActionListener(event -> {
                 if (hydratingFilters) return;
                 refreshAllFilterState();
@@ -340,6 +427,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             if (keepAliveTimer != null) keepAliveTimer.stop();
             int minutes = Math.max(1, PropertiesComponent.getInstance().getInt("zentao.idea.settings.keepAliveMinutes", DEFAULT_KEEP_ALIVE_MINUTES));
             keepAliveTimer = new javax.swing.Timer(minutes * 60 * 1000, event -> {
+                if (project.isDisposed()) {
+                    ((javax.swing.Timer)event.getSource()).stop();
+                    return;
+                }
                 if (!client.loggedIn()) return;
                 runAsync("正在保持禅道会话...", () -> {
                     if (!client.isSessionValid() && canRetryLogin()) {
@@ -475,7 +566,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void savePreferences() {
-            PropertiesComponent properties = PropertiesComponent.getInstance(project);
+            PropertiesComponent properties = projectProperties();
+            if (properties == null) return;
             properties.setValue("zentao.idea.serverUrl", serverField.getText(), DEFAULT_SERVER);
             properties.setValue("zentao.idea.account", accountField.getText(), "");
             properties.setValue("zentao.idea.autoLogin", autoLoginBox.isSelected(), true);
@@ -490,7 +582,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void restorePreferences() {
-            PropertiesComponent properties = PropertiesComponent.getInstance(project);
+            PropertiesComponent properties = projectProperties();
+            if (properties == null) return;
             serverField.setText(properties.getValue("zentao.idea.serverUrl", DEFAULT_SERVER));
             accountField.setText(properties.getValue("zentao.idea.account", ""));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
@@ -701,9 +794,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 }
                 return details;
             }, details -> {
-                String prompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
-                sendToClaudeCode(prompt);
-                setStatus(details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
+                try {
+                    String prompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
+                    sendToClaudeCode(prompt);
+                    setStatus(details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
+                } catch (Throwable error) {
+                    showDetailedError("AI一键修复失败", error);
+                }
             });
         }
 
@@ -712,8 +809,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 client.cleanupOldPromptImages(Duration.ofDays(1));
                 return client.getBugDetail(bugId);
             }, detail -> {
-                sendToClaudeCode(PromptBuilder.build(detail));
-                setStatus("Bug #" + bugId + " 已发送给 Claude Code with GUI");
+                try {
+                    sendToClaudeCode(PromptBuilder.build(detail));
+                    setStatus("Bug #" + bugId + " 已发送给 Claude Code with GUI");
+                } catch (Throwable error) {
+                    showDetailedError("AI修复失败", error);
+                }
             });
         }
 
@@ -750,7 +851,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             String assignee = "";
             String solution = "fixed";
             if (action.equals("assign")) {
-                assignee = Messages.showInputDialog(project, "请输入要指派给的禅道账号：", "禅道助手 - 指派", null);
+                assignee = selectAssignee();
                 if (assignee == null || assignee.isBlank()) return;
             } else if (action.equals("resolve")) {
                 Object selected = javax.swing.JOptionPane.showInputDialog(
@@ -779,7 +880,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             String finalAssignee = assignee;
             String finalSolution = solution;
             runAsync("正在" + title + " Bug #" + bugId + "...", () -> {
-                client.submitWorkflow(bugId, action, finalAssignee, finalSolution, comment);
+                client.submitWorkflow(bugId, action, finalAssignee, finalSolution, comment, members);
                 return true;
             }, ignored -> {
                 setStatus("Bug #" + bugId + " 已提交" + title);
@@ -787,23 +888,60 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             });
         }
 
+        private String selectAssignee() {
+            if (members.isEmpty() && client.loggedIn()) {
+                try {
+                    List<Item> loaded = client.listMembers(selectedProjectId());
+                    members.clear();
+                    members.addAll(loaded);
+                    populateMemberBox();
+                    savePreferences();
+                } catch (Exception error) {
+                    Messages.showErrorDialog(project, "成员列表获取失败：" + readableError(rootCause(error)), "禅道助手");
+                }
+            }
+            if (members.isEmpty()) {
+                return Messages.showInputDialog(project, "成员列表为空，请输入要指派给的禅道账号：", "禅道助手 - 指派", null);
+            }
+            ComboBox<Item> assigneeBox = new ComboBox<>();
+            assigneeBox.setEditable(true);
+            for (Item member : members) assigneeBox.addItem(member);
+            Object selected = javax.swing.JOptionPane.showInputDialog(
+                    root,
+                    "请选择要指派给的成员：",
+                    "禅道助手 - 指派",
+                    javax.swing.JOptionPane.QUESTION_MESSAGE,
+                    null,
+                    members.toArray(),
+                    members.get(0)
+            );
+            if (selected == null) return null;
+            if (selected instanceof Item item) return item.id;
+            String text = selected.toString().trim();
+            return text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
+        }
+
         private void sendToClaudeCode(String prompt) {
             putPromptOnClipboard(prompt);
             ActionManager manager = ActionManager.getInstance();
             for (String actionId : CLAUDE_ACTION_IDS) {
-                AnAction action = manager.getAction(actionId);
-                if (action != null) {
-                    AnActionEvent event = AnActionEvent.createEvent(
-                            action,
-                            DataManager.getInstance().getDataContext(root),
-                            null,
-                            ActionPlaces.UNKNOWN,
-                            ActionUiKind.NONE,
-                            null
-                    );
-                    action.actionPerformed(event);
-                    pastePromptIntoClaudeChat(prompt);
-                    return;
+                try {
+                    AnAction action = manager.getAction(actionId);
+                    if (action != null) {
+                        AnActionEvent event = AnActionEvent.createEvent(
+                                action,
+                                DataManager.getInstance().getDataContext(root),
+                                null,
+                                ActionPlaces.UNKNOWN,
+                                ActionUiKind.NONE,
+                                null
+                        );
+                        action.actionPerformed(event);
+                        pastePromptIntoClaudeChat(prompt);
+                        return;
+                    }
+                } catch (Throwable error) {
+                    debugLog("claude-action-failed", actionId + ": " + readableError(rootCause(error)));
                 }
             }
             Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，请粘贴到 Claude Code with GUI。", "禅道助手");
@@ -812,6 +950,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private void pastePromptIntoClaudeChat(String prompt) {
             javax.swing.Timer timer = new javax.swing.Timer(1200, event -> {
                 ((javax.swing.Timer)event.getSource()).stop();
+                if (project.isDisposed()) return;
                 putPromptOnClipboard(prompt);
                 nativePastePrompt();
             });
@@ -821,7 +960,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void putPromptOnClipboard(String prompt) {
             StringSelection selection = new StringSelection(prompt == null ? "" : prompt);
-            CopyPasteManager.getInstance().setContents(selection);
+            try {
+                CopyPasteManager.getInstance().setContents(selection);
+            } catch (Exception ignored) {
+                // Fall back to the system clipboard below.
+            }
             try {
                 java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
             } catch (Exception ignored) {
@@ -840,11 +983,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 robot.keyRelease(java.awt.event.KeyEvent.VK_V);
                 robot.keyRelease(modifierKey);
             } catch (Exception error) {
+                if (project.isDisposed()) return;
                 Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，但自动粘贴失败：" + error.getMessage(), "禅道助手");
             }
         }
 
         private <T> void runAsync(String status, ThrowingSupplier<T> supplier, java.util.function.Consumer<T> onSuccess) {
+            if (project.isDisposed()) return;
             setLoading(true, status);
             new SwingWorker<T, Void>() {
                 @Override
@@ -862,18 +1007,18 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
                 @Override
                 protected void done() {
+                    if (project.isDisposed()) return;
                     try {
                         onSuccess.accept(get());
-                    } catch (Exception error) {
+                    } catch (Throwable error) {
                         Throwable cause = rootCause(error);
-                        String message = readableError(cause);
-                        setStatus("失败：" + message);
-                        Messages.showErrorDialog(project, message, "禅道助手");
+                        setStatus("失败：" + briefStatusError(cause));
+                        showErrorPopupWithOptOut("禅道助手", detailedError(cause));
                     } finally {
                         try {
                             setLoading(false, null);
                         } catch (Exception error) {
-                            setStatus("失败：" + readableError(rootCause(error)));
+                            setStatus("失败：" + briefStatusError(rootCause(error)));
                         }
                     }
                 }
@@ -898,10 +1043,20 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void setStatus(String status) {
+            if (project.isDisposed()) return;
             String text = status == null ? "未知错误" : status;
             String normalized = text.startsWith("状态：") || text.startsWith("失败：") ? text : "状态：" + text;
             statusArea.setText(normalized);
             debugLog("status", normalized);
+        }
+
+        private PropertiesComponent projectProperties() {
+            if (project.isDisposed()) return null;
+            try {
+                return PropertiesComponent.getInstance(project);
+            } catch (RuntimeException ignored) {
+                return null;
+            }
         }
 
         private static Throwable rootCause(Throwable error) {
@@ -918,6 +1073,77 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return error.getClass().getName();
             }
             return error.getClass().getName() + ": " + message;
+        }
+
+        private void showDetailedError(String title, Throwable error) {
+            Throwable cause = rootCause(error);
+            String message = detailedError(cause);
+            setStatus("失败：" + briefStatusError(cause));
+            showErrorPopupWithOptOut(title, message);
+        }
+
+        private void showErrorPopupWithOptOut(String title, String message) {
+            if (project.isDisposed() || isErrorPopupSuppressed()) return;
+            String[] options = {"查看详情", "不再弹出", "关闭"};
+            int choice = Messages.showDialog(
+                    project,
+                    "操作失败。可查看详情，或关闭后续失败弹框提醒。",
+                    title,
+                    options,
+                    2,
+                    Messages.getErrorIcon()
+            );
+            if (choice == 0) {
+                Messages.showErrorDialog(project, message, title);
+            } else if (choice == 1) {
+                setErrorPopupSuppressed(true);
+                setStatus("已关闭失败弹框提醒");
+                Messages.showInfoMessage(project, "后续失败将仅显示在底部状态栏。", "禅道助手");
+            }
+        }
+
+        private boolean isErrorPopupSuppressed() {
+            PropertiesComponent properties = projectProperties();
+            return properties != null && properties.getBoolean(SUPPRESS_ERROR_POPUP_KEY, false);
+        }
+
+        private void setErrorPopupSuppressed(boolean value) {
+            PropertiesComponent properties = projectProperties();
+            if (properties != null) {
+                properties.setValue(SUPPRESS_ERROR_POPUP_KEY, value, false);
+            }
+        }
+
+        private static String briefStatusError(Throwable error) {
+            String message = error.getMessage();
+            if (message == null || message.isBlank()) {
+                return "操作失败";
+            }
+            message = message.trim();
+            for (String marker : List.of("。当前状态", "，当前状态", "当前状态", "。响应摘要", "，响应摘要", "响应摘要")) {
+                int index = message.indexOf(marker);
+                if (index > 0) {
+                    message = message.substring(0, index).replaceAll("[。；;，,\\s]+$", "");
+                    break;
+                }
+            }
+            if (message.length() > 60) {
+                message = message.substring(0, 57) + "...";
+            }
+            return message.isBlank() ? "操作失败" : message;
+        }
+
+        private static String detailedError(Throwable error) {
+            StringWriter writer = new StringWriter();
+            error.printStackTrace(new PrintWriter(writer));
+            String stack = writer.toString();
+            String[] lines = stack.split("\\R");
+            StringBuilder builder = new StringBuilder(readableError(error));
+            builder.append("\n\n堆栈摘要：");
+            for (int i = 1; i < Math.min(lines.length, 12); i++) {
+                builder.append("\n").append(lines[i].trim());
+            }
+            return builder.toString();
         }
 
         private void debugLog(String event, String message) {
@@ -948,52 +1174,70 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final class BugCard extends JPanel {
             private BugCard(BugSummary bug) {
                 super(new BorderLayout(6, 6));
-                setBorder(new LineBorder(statusColor(bug.status), 1, true));
+                setBorder(new CompoundBorder(new LineBorder(statusColor(bug.status), 1, true), JBUI.Borders.empty(8, 10)));
                 setBackground(statusBackground(bug.status));
                 setOpaque(true);
                 setAlignmentX(LEFT_ALIGNMENT);
                 setMaximumSize(new Dimension(Integer.MAX_VALUE, getPreferredSize().height + 96));
                 JPanel title = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
                 title.setOpaque(false);
-                title.add(new JLabel("#" + bug.id));
+                JLabel id = new JLabel("#" + bug.id);
+                id.setForeground(new JBColor(new Color(33, 88, 192), new Color(112, 166, 255)));
+                id.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 13));
+                title.add(id);
                 JLabel status = new JLabel(statusText(bug.status));
                 status.setForeground(statusColor(bug.status));
+                status.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 12));
                 title.add(status);
-                title.add(new JLabel("指派给：" + assigneeText(bug.assignedTo)));
+                JLabel assigned = new JLabel("指派给：" + assigneeText(bug.assignedTo));
+                assigned.setForeground(TEXT_SUB);
+                title.add(assigned);
                 if (!bug.priority.equals("unknown")) title.add(new JLabel(priorityText(bug.priority)));
                 if (bug.hasVideo) title.add(new JLabel("🎬 视频"));
                 add(title, BorderLayout.NORTH);
-                add(new JLabel("<html>" + html(bug.title) + "</html>"), BorderLayout.CENTER);
+                JLabel summary = new JLabel("<html>" + html(bug.title) + "</html>");
+                summary.setForeground(TEXT_MAIN);
+                summary.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 14));
+                add(summary, BorderLayout.CENTER);
                 JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
                 buttons.setOpaque(false);
                 JButton preview = new JButton("预览");
+                applyCardButton(preview, BTN_SECONDARY_BG);
                 preview.addActionListener(event -> preview(bug.id));
                 buttons.add(preview);
                 if (!bug.status.equals("resolved") && !bug.status.equals("closed")) {
                     JButton assign = new JButton("指派");
+                    applyCardButton(assign, new Color(57, 129, 255));
                     assign.addActionListener(event -> submitWorkflow(bug.id, "assign"));
                     buttons.add(assign);
                     JButton confirm = new JButton("确认");
+                    applyCardButton(confirm, new Color(35, 170, 135));
                     confirm.addActionListener(event -> submitWorkflow(bug.id, "confirm"));
                     buttons.add(confirm);
                     JButton resolve = new JButton("解决");
+                    applyCardButton(resolve, BTN_SUCCESS_BG);
                     resolve.addActionListener(event -> submitWorkflow(bug.id, "resolve"));
                     buttons.add(resolve);
                     JButton close = new JButton("关闭");
+                    applyCardButton(close, BTN_DANGER_BG);
                     close.addActionListener(event -> submitWorkflow(bug.id, "close"));
                     buttons.add(close);
-                    JButton aiFix = new JButton("AI修复");
+                    JButton aiFix = new GradientButton("✦ AI修复");
+                    applyCardButton(aiFix, BTN_PURPLE_BG);
                     aiFix.addActionListener(event -> aiFix(bug.id));
                     buttons.add(aiFix);
                 } else if (bug.status.equals("resolved")) {
                     JButton activate = new JButton("激活");
+                    applyCardButton(activate, new Color(235, 141, 49));
                     activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
                     buttons.add(activate);
                     JButton close = new JButton("关闭");
+                    applyCardButton(close, BTN_DANGER_BG);
                     close.addActionListener(event -> submitWorkflow(bug.id, "close"));
                     buttons.add(close);
                 } else {
                     JButton activate = new JButton("激活");
+                    applyCardButton(activate, new Color(235, 141, 49));
                     activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
                     buttons.add(activate);
                 }
@@ -1046,7 +1290,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private static List<BugSummary> unresolved(List<BugSummary> values) {
-            return values.stream().filter(bug -> !bug.status.equals("resolved") && !bug.status.equals("closed")).toList();
+            if (values == null) return List.of();
+            return values.stream()
+                    .filter(bug -> bug != null && !"resolved".equals(bug.status) && !"closed".equals(bug.status))
+                    .toList();
         }
 
         private static Color statusColor(String status) {
@@ -1098,6 +1345,25 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             T get() throws Exception;
         }
 
+        private static final class GradientButton extends JButton {
+            private GradientButton(String text) {
+                super(text);
+                setContentAreaFilled(false);
+                setOpaque(false);
+            }
+
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                GradientPaint paint = new GradientPaint(0, 0, new Color(124, 58, 237), getWidth() / 2f, getHeight(), new Color(6, 182, 212), true);
+                g2.setPaint(paint);
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), getHeight(), getHeight());
+                g2.dispose();
+                super.paintComponent(g);
+            }
+        }
+
         private record Item(String id, String name) {
             @Override
             public String toString() {
@@ -1111,7 +1377,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private static final class PromptBuilder {
             private static String build(BugDetail bug) {
-                List<String> images = bug.promptImages.stream().limit(32).toList();
+                List<String> images = safePromptImages(bug).stream().limit(32).toList();
                 String imageText = images.isEmpty() ? "未提供" : indexedImages(images, "");
                 String description = textOrFallback(bug.description, bug.title);
                 String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
@@ -1122,13 +1388,17 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 List<String> sections = new ArrayList<>();
                 for (int i = 0; i < bugs.size(); i++) {
                     BugDetail bug = bugs.get(i);
-                    List<String> images = bug.promptImages.stream().limit(32).toList();
+                    List<String> images = safePromptImages(bug).stream().limit(32).toList();
                     String imageText = images.isEmpty() ? "  未提供" : indexedImages(images, "  ");
                     String description = textOrFallback(bug.description, bug.title);
                     String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
                     sections.add("## " + (i + 1) + ". Bug #" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText);
                 }
                 return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n" + String.join("\n\n---\n\n", sections) + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，Claude Code 可直接读取上述本地路径，不需要访问禅道链接。\n\n完成后请按 Bug 编号分别说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+            }
+
+            private static List<String> safePromptImages(BugDetail bug) {
+                return bug == null || bug.promptImages == null ? List.of() : bug.promptImages;
             }
 
             private static String indexedImages(List<String> images, String prefix) {
@@ -1408,38 +1678,175 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 expectedResultHtml = inlinePreviewImages(expectedResultHtml);
                 List<Attachment> attachments = parseAttachments(html);
                 List<String> promptImages = preparePromptImages(id, descriptionHtml, reproduceStepsHtml, expectedResultHtml);
-                return new BugDetail(id, title.isBlank() ? "Bug #" + id : title, parsePriority(htmlText(html)), parseStatus(htmlText(html)), firstText(html, "\\d{4}-\\d{2}-\\d{2}"), "", "", description, descriptionHtml, htmlText(reproduceStepsHtml), reproduceStepsHtml, htmlText(expectedResultHtml), expectedResultHtml, htmlText(readSectionHtml(html, "实际结果|结果")), attachments, promptImages);
+                String detailText = htmlText(html);
+                String assignedTo = firstNonBlank(readDetailFieldHtml(html, "当前指派", "指派给"));
+                String status = parseDetailStatusFromHtml(html);
+                return new BugDetail(id, title.isBlank() ? "Bug #" + id : title, parsePriority(detailText), status, firstText(html, "\\d{4}-\\d{2}-\\d{2}"), assignedTo, "", description, descriptionHtml, htmlText(reproduceStepsHtml), reproduceStepsHtml, htmlText(expectedResultHtml), expectedResultHtml, htmlText(readSectionHtml(html, "实际结果|结果")), attachments, promptImages);
             }
 
-            private void submitWorkflow(String bugId, String action, String assignee, String solution, String comment) throws Exception {
+            private String readDetailFieldHtml(String html, String... labels) {
+                String raw = readSectionHtml(html, String.join("|", labels));
+                return raw.isBlank() ? "" : normalizeDetailField(htmlText(raw));
+            }
+
+            private String parseDetailStatusFromHtml(String html) {
+                String field = readDetailFieldHtml(html, "Bug状态");
+                return field.isBlank() ? "unknown" : parseStatus(field);
+            }
+
+            private static String normalizeDetailField(String value) {
+                if (value == null || value.isBlank()) return "";
+                return value.replaceAll("\\s*于\\s*\\d{4}-\\d{2}-\\d{2}(?:\\s+\\d{2}:\\d{2}(?::\\d{2})?)?", "").replaceAll("\\s+", " ").trim();
+            }
+
+            private static boolean matchesAssignee(String currentAssignee, String expectedAccount, List<Item> members) {
+                if (expectedAccount == null || expectedAccount.isBlank()) return false;
+                if (containsPerson(currentAssignee, expectedAccount)) return true;
+                if (members == null) return false;
+                for (Item member : members) {
+                    if (!member.id.equalsIgnoreCase(expectedAccount) && !expectedAccount.equalsIgnoreCase(member.name)) continue;
+                    if (containsPerson(currentAssignee, member.id) || containsPerson(currentAssignee, member.name)) return true;
+                }
+                return false;
+            }
+
+            private void submitWorkflow(String bugId, String action, String assignee, String solution, String comment, List<Item> members) throws Exception {
                 String endpoint = switch (action) {
                     case "assign" -> "assignTo";
                     case "confirm" -> "confirmBug";
                     default -> action;
                 };
+                String formPath = "index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId) + "&onlybody=yes";
                 String formHtml = get("index.php", Map.of("m", "bug", "f", endpoint, "bugID", bugId, "onlybody", "yes"), false);
+                String submitPath = readFormAction(formHtml, "index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId));
                 Map<String, String> form = readFormInputs(formHtml);
                 String safeComment = comment == null ? "" : comment;
-                form.put("comment", safeComment);
-                form.put("remark", safeComment);
-                form.put("comment[]", safeComment);
-                form.putIfAbsent("mailto", "");
+                String submittedAssignee = assignee;
                 if (action.equals("assign")) {
-                    form.put("assignedTo", assignee);
-                    form.put("assignedTo[]", assignee);
+                    submittedAssignee = resolveAssigneeForForm(assignee, members, formHtml);
+                    // Match web submit payload: assignedTo/status/comment/uid.
+                    Map<String, String> assignForm = new LinkedHashMap<>();
+                    if (form.containsKey("status")) assignForm.put("status", form.get("status"));
+                    if (form.containsKey("uid")) assignForm.put("uid", form.get("uid"));
+                    assignForm.put("assignedTo", submittedAssignee);
+                    assignForm.put("comment", safeComment);
+                    form = assignForm;
                 } else if (action.equals("resolve")) {
+                    form.put("comment", safeComment);
+                    form.put("remark", safeComment);
+                    form.put("comment[]", safeComment);
+                    form.putIfAbsent("mailto", "");
                     form.put("resolution", solution == null || solution.isBlank() ? "fixed" : solution);
                     form.put("resolvedBuild", "trunk");
                     form.put("resolvedDate", formatZenTaoDate(new java.util.Date()));
                 } else if (action.equals("confirm")) {
+                    form.put("comment", safeComment);
+                    form.put("remark", safeComment);
+                    form.put("comment[]", safeComment);
+                    form.putIfAbsent("mailto", "");
                     form.put("confirmed", "1");
                 } else if (action.equals("close")) {
+                    form.put("comment", safeComment);
+                    form.put("remark", safeComment);
+                    form.put("comment[]", safeComment);
+                    form.putIfAbsent("mailto", "");
                     form.putIfAbsent("closedDate", formatZenTaoDate(new java.util.Date()));
+                } else {
+                    form.put("comment", safeComment);
+                    form.put("remark", safeComment);
+                    form.put("comment[]", safeComment);
+                    form.putIfAbsent("mailto", "");
                 }
-                String body = post("index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId), form);
+                Map<String, String> submitParams = readActionParams(submitPath);
+                if (!submitParams.containsKey("m") || !submitParams.containsKey("f")) {
+                    submitParams = new LinkedHashMap<>();
+                    submitParams.put("m", "bug");
+                    submitParams.put("f", endpoint);
+                    submitParams.put("bugID", bugId);
+                } else if (!submitParams.containsKey("bugID") && !submitParams.containsKey("id")) {
+                    submitParams = new LinkedHashMap<>(submitParams);
+                    submitParams.put("bugID", bugId);
+                }
+                boolean ajax = !action.equals("assign");
+                String body = post(submitPath, submitParams, form, formPath, ajax);
                 if (body.contains("\"result\":\"fail\"") || body.contains("error")) {
                     throw new IllegalStateException("禅道未接受该工作流提交，请在网页确认必填字段。");
                 }
+                verifyWorkflowEffect(bugId, action, assignee, submittedAssignee, body, members);
+            }
+
+            private void verifyWorkflowEffect(String bugId, String action, String assignee, String submittedAssignee, String responseBody, List<Item> members) throws Exception {
+                BugDetail detail = getBugDetail(bugId);
+                String currentStatus = detail.status;
+                String currentAssignee = detail.assignedTo;
+                boolean ok = switch (action) {
+                    case "assign" -> matchesAssignee(currentAssignee, assignee, members) || matchesAssignee(currentAssignee, submittedAssignee, members);
+                    case "resolve" -> "resolved".equals(currentStatus);
+                    case "close" -> "closed".equals(currentStatus);
+                    case "activate" -> "active".equals(currentStatus);
+                    case "confirm" -> htmlText(get("index.php", Map.of("m", "bug", "f", "view", "bugID", bugId), false)).matches("(?is).*已确认.*|.*confirmed.*");
+                    default -> true;
+                };
+                if (!ok) {
+                    throw new IllegalStateException("禅道" + workflowActionName(action) + "后校验未生效。当前状态：" + statusText(currentStatus) + "，当前指派：" + (currentAssignee.isBlank() ? "未知" : normalizeDetailField(currentAssignee)) + "，目标指派：" + (assignee == null ? "" : assignee) + "，提交值：" + (submittedAssignee == null ? "" : submittedAssignee) + "。响应摘要：" + htmlText(responseBody).replaceAll("\\s+", " ").substring(0, Math.min(300, htmlText(responseBody).replaceAll("\\s+", " ").length())));
+                }
+            }
+
+            private static String resolveAssigneeForForm(String requested, List<Item> members, String formHtml) {
+                String value = requested == null ? "" : requested.trim();
+                if (value.isBlank()) return "";
+                Set<String> candidates = new LinkedHashSet<>(personAliases(value));
+                if (members != null) {
+                    for (Item member : members) {
+                        if (member == null) continue;
+                        Set<String> aliases = new LinkedHashSet<>(personAliases(member.id));
+                        aliases.addAll(personAliases(member.name));
+                        if (aliases.stream().anyMatch(alias -> candidates.stream().anyMatch(candidate -> candidate.equals(alias) || candidate.contains(alias) || alias.contains(candidate)))) {
+                            candidates.addAll(aliases);
+                        }
+                    }
+                }
+                List<Item> options = parseAssigneeOptionsFromForm(formHtml);
+                for (Item option : options) {
+                    Set<String> aliases = new LinkedHashSet<>(personAliases(option.id));
+                    aliases.addAll(personAliases(option.name));
+                    boolean matched = aliases.stream().anyMatch(alias -> candidates.stream().anyMatch(candidate -> candidate.equals(alias) || candidate.contains(alias) || alias.contains(candidate)));
+                    if (matched && option.id != null && !option.id.isBlank()) {
+                        return option.id.trim();
+                    }
+                }
+                return value;
+            }
+
+            private static List<Item> parseAssigneeOptionsFromForm(String html) {
+                List<Item> result = new ArrayList<>();
+                for (String select : matches(html, "<select\\b[^>]*\\bname=[\"']assignedTo(?:\\[\\])?[\"'][^>]*>[\\s\\S]*?</select>")) {
+                    for (String option : matches(select, "<option\\b[^>]*>[\\s\\S]*?</option>")) {
+                        String account = attr(option, "value").trim();
+                        String name = htmlText(option).trim();
+                        if (account.isBlank() || name.isBlank()) continue;
+                        if (account.matches("(?i)all|0|closed|ditto") || name.matches("全部|所有|选择|空|无|closed")) continue;
+                        result.add(new Item(account, name));
+                    }
+                }
+                return result;
+            }
+
+            private static Map<String, String> readActionParams(String actionPath) {
+                Map<String, String> result = new LinkedHashMap<>();
+                if (actionPath == null || actionPath.isBlank()) return result;
+                int queryIndex = actionPath.indexOf('?');
+                if (queryIndex < 0 || queryIndex + 1 >= actionPath.length()) return result;
+                String query = actionPath.substring(queryIndex + 1);
+                for (String part : query.split("&")) {
+                    if (part == null || part.isBlank()) continue;
+                    int equalIndex = part.indexOf('=');
+                    String rawKey = equalIndex >= 0 ? part.substring(0, equalIndex) : part;
+                    String rawValue = equalIndex >= 0 ? part.substring(equalIndex + 1) : "";
+                    String key = urlDecode(rawKey).trim();
+                    if (!key.isBlank()) result.put(key, urlDecode(rawValue));
+                }
+                return result;
             }
 
             private List<BugSummary> parseBugs(String html, String assignedTo) {
@@ -1666,14 +2073,28 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private String post(String path, Map<String, String> form) throws Exception {
-                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, Map.of()))
+                return post(path, Map.of(), form, "index.php?m=user&f=login", true);
+            }
+
+            private String post(String path, Map<String, String> form, String refererPath) throws Exception {
+                return post(path, Map.of(), form, refererPath, true);
+            }
+
+            private String post(String path, Map<String, String> params, Map<String, String> form, String refererPath) throws Exception {
+                return post(path, params, form, refererPath, true);
+            }
+
+            private String post(String path, Map<String, String> params, Map<String, String> form, String refererPath, boolean ajax) throws Exception {
+                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params))
                         .timeout(Duration.ofSeconds(15))
                         .POST(HttpRequest.BodyPublishers.ofString(encode(form)))
-                        .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                        .header("Accept", ajax ? "application/json, text/javascript, */*; q=0.01" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                         .header("Content-Type", "application/x-www-form-urlencoded")
                         .header("Origin", baseUrl.replaceFirst("/$", ""))
-                        .header("Referer", buildUri("index.php?m=user&f=login", Map.of()).toString())
-                        .header("X-Requested-With", "XMLHttpRequest");
+                        .header("Referer", buildUri(refererPath, Map.of()).toString());
+                if (ajax) {
+                    builder.header("X-Requested-With", "XMLHttpRequest");
+                }
                 addCookieHeader(builder);
                 HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 mergeSetCookie(response);
@@ -1704,7 +2125,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private URI buildUri(String path, Map<String, String> params) {
                 String query = encode(params);
-                return URI.create(baseUrl + path + (query.isBlank() ? "" : (path.contains("?") ? "&" : "?") + query));
+                URI base = URI.create(baseUrl);
+                URI uri = path.matches("(?i)^https?://.*") ? URI.create(path) : base.resolve(path);
+                String value = uri.toString();
+                return URI.create(value + (query.isBlank() ? "" : (value.contains("?") ? "&" : "?") + query));
             }
 
             private static String normalizeBaseUrl(String value) {
@@ -1746,7 +2170,32 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     String name = attr(input, "name");
                     if (!name.isBlank()) result.put(name, attr(input, "value"));
                 }
+                for (String textarea : matches(html, "<textarea\\b[\\s\\S]*?</textarea>")) {
+                    String name = attr(textarea, "name");
+                    if (!name.isBlank()) result.putIfAbsent(name, htmlText(textarea));
+                }
+                for (String select : matches(html, "<select\\b[\\s\\S]*?</select>")) {
+                    String name = attr(select, "name");
+                    if (name.isBlank()) continue;
+                    String value = "";
+                    for (String option : matches(select, "<option\\b[^>]*>[\\s\\S]*?</option>")) {
+                        if (option.matches("(?is).*\\sselected(?:\\s|=|>).*")) {
+                            value = attr(option, "value");
+                            break;
+                        }
+                        if (value.isBlank()) value = attr(option, "value");
+                    }
+                    result.putIfAbsent(name, value);
+                }
                 return result;
+            }
+
+            private static String readFormAction(String html, String fallback) {
+                for (String form : matches(html, "<form\\b[^>]*>")) {
+                    String action = attr(form, "action").replace("&amp;", "&").trim();
+                    if (!action.isBlank()) return action;
+                }
+                return fallback;
             }
 
             private static boolean isLoginExpired(String html) {
@@ -1898,7 +2347,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 String reproduceStepsHtml = "";
                 if (steps != null) {
                     Marker result = findSectionMarker(value, List.of("结果", "实际结果"));
-                    int end = List.of(result, expected).stream().filter(item -> item != null).map(item -> item.index).sorted().findFirst().orElse(value.length());
+                    int end = value.length();
+                    if (result != null) end = Math.min(end, result.index);
+                    if (expected != null) end = Math.min(end, expected.index);
                     if (steps.end < end) reproduceStepsHtml = value.substring(steps.end, end).trim();
                 }
                 String expectedResultHtml = expected == null ? "" : value.substring(expected.end).trim();
@@ -2049,6 +2500,41 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                         .replaceFirst("(?i)^(?:BUG\\s*)?#?" + Pattern.quote(id) + "(?:\\s+|\\s*[-:：#]\\s*)", "")
                         .replaceFirst("(?i)^(?:BUG\\s*)?#?" + Pattern.quote(id) + "$", "")
                         .trim();
+            }
+
+            private static String readDetailField(String text, String label) {
+                Matcher matcher = Pattern.compile(Pattern.quote(label) + "\\s*[:：]?\\s*([^\\n\\r]+)", Pattern.CASE_INSENSITIVE).matcher(text == null ? "" : text);
+                return matcher.find() ? matcher.group(1).trim() : "";
+            }
+
+            private static String parseDetailStatus(String text) {
+                String field = readDetailField(text, "Bug状态");
+                return field.isBlank() ? parseStatus(text) : parseStatus(field);
+            }
+
+            private static String firstNonBlank(String... values) {
+                for (String value : values) {
+                    if (value != null && !value.isBlank()) return value;
+                }
+                return "";
+            }
+
+            private static boolean containsPerson(String value, String expected) {
+                if (expected == null || expected.isBlank()) return false;
+                Set<String> actual = new LinkedHashSet<>(personAliases(value));
+                Set<String> target = new LinkedHashSet<>(personAliases(expected));
+                return target.stream().anyMatch(item -> actual.stream().anyMatch(candidate -> candidate.equals(item) || candidate.contains(item) || item.contains(candidate)));
+            }
+
+            private static String workflowActionName(String action) {
+                return switch (action) {
+                    case "assign" -> "指派";
+                    case "confirm" -> "确认";
+                    case "resolve" -> "解决";
+                    case "close" -> "关闭";
+                    case "activate" -> "激活";
+                    default -> action;
+                };
             }
 
             private record DetailSections(String descriptionHtml, String reproduceStepsHtml, String expectedResultHtml) {}

@@ -1,5 +1,6 @@
 package com.zentao.bugassistant;
 
+import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorPolicy;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
@@ -10,7 +11,7 @@ import org.jdom.Element;
 import org.jetbrains.annotations.NonNls;
 import org.jetbrains.annotations.NotNull;
 
-public final class ZenTaoPreviewFileEditorProvider implements FileEditorProvider {
+public final class ZenTaoPreviewFileEditorProvider implements FileEditorProvider, DumbAware {
     @Override
     public boolean accept(@NotNull Project project, @NotNull VirtualFile file) {
         return file instanceof ZenTaoPreviewVirtualFile;

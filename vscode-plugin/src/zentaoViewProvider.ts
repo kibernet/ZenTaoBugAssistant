@@ -39,6 +39,7 @@ interface ViewState {
 
 export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "zentaoBugAssistant.view";
+  private static readonly suppressErrorPopupKey = "zentao.suppressErrorPopup";
 
   private view?: vscode.WebviewView;
   private client?: ZenTaoClient;
@@ -64,6 +65,10 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.context.subscriptions.push(new vscode.Disposable(() => this.stopSessionKeepAlive()));
+    this.context.subscriptions.push(vscode.commands.registerCommand("zentaoBugAssistant.enableErrorPopup", async () => {
+      await this.context.globalState.update(ZenTaoBugAssistantViewProvider.suppressErrorPopupKey, false);
+      vscode.window.showInformationMessage("已恢复失败弹窗提示。");
+    }));
     void this.cleanupImageCacheOncePerDay();
   }
 
@@ -174,8 +179,10 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
     await this.run("正在获取 Bug 列表...", async () => {
       if (!this.state.projects.length) {
+        this.updateStatus("正在加载项目列表...");
         await this.loadProjects(false);
       }
+      this.updateStatus(`正在拉取 Bug 列表（项目：${this.state.selectedProjectId ?? "全部"}）...`);
       // #region agent log
       debugLog("B1,B2,B5", "vscode-plugin/src/zentaoViewProvider.ts:124", "refresh bug list starting", {
         projectCount: this.state.projects.length,
@@ -190,6 +197,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
         assigneeScope: "all",
         teamMembers: []
       }));
+      this.updateStatus(`已拉取 ${bugs.length} 个 Bug，正在补全附件状态...`);
       this.state.bugs = await this.withAutoLoginRetry(() => this.client!.enrichVideoFlags(bugs));
       // #region agent log
       debugLog("B2,B5", "vscode-plugin/src/zentaoViewProvider.ts:137", "refresh bug list completed", {
@@ -201,7 +209,9 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.selectedIds = [];
       this.state.status = `共 ${this.state.bugs.length} 个 Bug`;
       if (!this.state.bugs.length) {
+        this.updateStatus("未拉取到 Bug，正在自动诊断入口权限...");
         await this.crawlCurrentBugAccess();
+        this.updateStatus("未发现 Bug，请先登录/刷新或检查筛选条件。");
       }
     });
   }
@@ -704,24 +714,29 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     bugId: string,
     action: BugWorkflowAction
   ): Promise<BugWorkflowRequest | undefined> {
+    if (action === "assign") {
+      await this.ensureMembersReadyForAssign();
+      const assignedTo = await this.pickAssigneeAccount();
+      if (!assignedTo) {
+        return undefined;
+      }
+      const comment = await vscode.window.showInputBox({
+        prompt: "填写指派备注/修改日志",
+        ignoreFocusOut: true
+      });
+      if (comment === undefined) {
+        return undefined;
+      }
+      return { bugId, action, assignedTo, comment, members: this.state.members };
+    }
+
     const comment = await vscode.window.showInputBox({
-      prompt: action === "assign" ? "填写指派备注/修改日志" : "填写操作备注/修改日志",
+      prompt: "填写操作备注/修改日志",
       value: action === "resolve" ? "已修复，请验证。" : action === "activate" ? "重新激活，请继续处理。" : "",
       ignoreFocusOut: true
     });
     if (comment === undefined) {
       return undefined;
-    }
-
-    if (action === "assign") {
-      const assignedTo = await vscode.window.showInputBox({
-        prompt: "指派给哪个禅道账号？",
-        ignoreFocusOut: true
-      });
-      if (!assignedTo) {
-        return undefined;
-      }
-      return { bugId, action, assignedTo, comment };
     }
 
     if (action === "resolve") {
@@ -746,6 +761,50 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     return { bugId, action, comment };
   }
 
+  private async ensureMembersReadyForAssign(): Promise<void> {
+    if (!(await this.ensureAuthenticated())) {
+      return;
+    }
+    await this.loadMembers(false);
+    if (!this.state.members.length) {
+      await this.loadMembers(true);
+    }
+  }
+
+  private async pickAssigneeAccount(): Promise<string | undefined> {
+    const members = this.state.members ?? [];
+    if (!members.length) {
+      return vscode.window.showInputBox({
+        prompt: "指派给哪个禅道账号？",
+        ignoreFocusOut: true
+      });
+    }
+    const picks: Array<vscode.QuickPickItem & { account?: string; manual?: boolean }> = members.map((member) => ({
+      label: member.name || member.account,
+      description: member.account,
+      account: member.account
+    }));
+    picks.unshift({
+      label: "$(edit) 手动输入账号",
+      description: "不在列表中时使用",
+      manual: true
+    });
+    const selected = await vscode.window.showQuickPick(picks, {
+      placeHolder: "选择指派成员（或手动输入）",
+      ignoreFocusOut: true
+    });
+    if (!selected) {
+      return undefined;
+    }
+    if (selected.manual) {
+      return vscode.window.showInputBox({
+        prompt: "请输入要指派的禅道账号",
+        ignoreFocusOut: true
+      });
+    }
+    return selected.account;
+  }
+
   private async run(status: string, action: () => Promise<void>): Promise<void> {
     try {
       this.state.loading = true;
@@ -754,12 +813,30 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       await action();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.state.status = `失败：${message}`;
-      vscode.window.showErrorMessage(this.state.status);
+      this.state.status = "失败：操作未完成，请查看弹窗详情";
+      if (!this.context.globalState.get<boolean>(ZenTaoBugAssistantViewProvider.suppressErrorPopupKey, false)) {
+        const brief = briefErrorMessage(message);
+        const choice = await vscode.window.showErrorMessage(
+          `禅道助手操作失败：${brief}`,
+          "查看详情",
+          "不再弹出"
+        );
+        if (choice === "查看详情") {
+          await vscode.window.showErrorMessage(`禅道助手详细错误：${message}`, { modal: true });
+        } else if (choice === "不再弹出") {
+          await this.context.globalState.update(ZenTaoBugAssistantViewProvider.suppressErrorPopupKey, true);
+          vscode.window.showInformationMessage("已关闭失败弹窗提示，可在命令面板执行“ZenTao: 启用失败弹窗”恢复。");
+        }
+      }
     } finally {
       this.state.loading = false;
       this.postState();
     }
+  }
+
+  private updateStatus(status: string): void {
+    this.state.status = status;
+    this.postState();
   }
 
   private async restoreClient(): Promise<void> {
@@ -1043,6 +1120,21 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   }
 }
 
+function briefErrorMessage(value: string): string {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "未知错误";
+  }
+  const shortened = text
+    .replace(/响应摘要：.*$/i, "")
+    .replace(/<!DOCTYPE html[\s\S]*$/i, "")
+    .trim();
+  if (shortened.length <= 120) {
+    return shortened;
+  }
+  return `${shortened.slice(0, 117)}...`;
+}
+
 async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
   await vscode.env.clipboard.writeText(prompt);
 
@@ -1050,7 +1142,7 @@ async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
     engine === "cursor"
       ? ["cursor.openChat", "workbench.action.chat.open", "workbench.action.chat.openEditSession"]
       : engine === "claudeCode"
-        ? ["claude-code.open", "claudeCode.open", "claude-code.chat", "claudeCode.chat", "workbench.action.chat.open"]
+        ? ["claude-code.chat", "claudeCode.chat", "claude-code.open", "claudeCode.open", "ClaudeCode.Chat", "ClaudeCode.Open"]
         : [
             "cursor.openChat",
             "workbench.action.chat.open",

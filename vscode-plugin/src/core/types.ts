@@ -61,6 +61,7 @@ export interface BugWorkflowRequest {
   assignedTo?: string;
   solution?: BugResolveSolution;
   resolvedBuild?: string;
+  members?: ZenTaoMember[];
 }
 
 export interface ZenTaoBugDetail extends ZenTaoBugSummary {
