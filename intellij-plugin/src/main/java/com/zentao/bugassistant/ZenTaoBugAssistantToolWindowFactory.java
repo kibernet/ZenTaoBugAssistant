@@ -4,7 +4,6 @@ import com.intellij.ide.DataManager;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
-import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.fileEditor.FileEditor;
@@ -60,6 +59,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JButton;
@@ -79,7 +79,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         ZenTaoBugAssistantPanel panel = new ZenTaoBugAssistantPanel(project, toolWindow);
-        Content content = ContentFactory.getInstance().createContent(panel.root, "", false);
+        Content content = ContentFactory.SERVICE.getInstance().createContent(panel.root, "", false);
         toolWindow.getContentManager().addContent(content);
     }
 
@@ -780,7 +780,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             while (matcher.find()) {
                 if (!matcher.group(1).trim().isBlank()) aliases.add(matcher.group(1).trim());
             }
-            return aliases.stream().map(item -> item.toLowerCase(Locale.ROOT)).filter(item -> !item.isBlank()).toList();
+            return aliases.stream().map(item -> item.toLowerCase(Locale.ROOT)).filter(item -> !item.isBlank()).collect(Collectors.toList());
         }
 
         private void aiFixAll() {
@@ -832,22 +832,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             FileEditorManager editorManager = FileEditorManager.getInstance(project);
             FileEditor[] editors = editorManager.openFile(previewFile, true);
             for (FileEditor editor : editors) {
-                if (editor instanceof ZenTaoPreviewFileEditor previewEditor) {
-                    previewEditor.updateHtml(contentHtml);
+                if (editor instanceof ZenTaoPreviewFileEditor) {
+                    ((ZenTaoPreviewFileEditor) editor).updateHtml(contentHtml);
                 }
             }
             setStatus("Bug #" + detail.id + " 预览已在编辑区标签页打开");
         }
 
         private void submitWorkflow(String bugId, String action) {
-            String title = switch (action) {
-                case "assign" -> "指派";
-                case "confirm" -> "确认";
-                case "resolve" -> "解决";
-                case "close" -> "关闭";
-                case "activate" -> "激活";
-                default -> action;
-            };
+            String title;
+            switch (action) {
+                case "assign": title = "指派"; break;
+                case "confirm": title = "确认"; break;
+                case "resolve": title = "解决"; break;
+                case "close": title = "关闭"; break;
+                case "activate": title = "激活"; break;
+                default: title = action;
+            }
             String assignee = "";
             String solution = "fixed";
             if (action.equals("assign")) {
@@ -864,15 +865,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                         "已解决"
                 );
                 if (selected == null) return;
-                solution = switch (selected.toString()) {
-                    case "重复 Bug" -> "duplicate";
-                    case "无法重现" -> "notReproducible";
-                    case "延期处理" -> "postponed";
-                    case "不予解决" -> "willNotFix";
-                    case "设计如此" -> "byDesign";
-                    case "外部原因" -> "external";
-                    default -> "fixed";
-                };
+                switch (selected.toString()) {
+                    case "重复 Bug": solution = "duplicate"; break;
+                    case "无法重现": solution = "notReproducible"; break;
+                    case "延期处理": solution = "postponed"; break;
+                    case "不予解决": solution = "willNotFix"; break;
+                    case "设计如此": solution = "byDesign"; break;
+                    case "外部原因": solution = "external"; break;
+                    default: solution = "fixed";
+                }
             }
             String defaultComment = action.equals("resolve") ? "已修复，请验证。" : action.equals("activate") ? "重新激活，请继续处理。" : "";
             String comment = Messages.showInputDialog(project, title + " Bug #" + bugId + "，可填写备注：", "禅道助手 - " + title, null, defaultComment, null);
@@ -916,7 +917,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     members.get(0)
             );
             if (selected == null) return null;
-            if (selected instanceof Item item) return item.id;
+            if (selected instanceof Item) return ((Item) selected).id;
             String text = selected.toString().trim();
             return text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
         }
@@ -928,13 +929,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 try {
                     AnAction action = manager.getAction(actionId);
                     if (action != null) {
-                        AnActionEvent event = AnActionEvent.createEvent(
+                        AnActionEvent event = AnActionEvent.createFromAnAction(
                                 action,
-                                DataManager.getInstance().getDataContext(root),
                                 null,
                                 ActionPlaces.UNKNOWN,
-                                ActionUiKind.NONE,
-                                null
+                                DataManager.getInstance().getDataContext(root)
                         );
                         action.actionPerformed(event);
                         pastePromptIntoClaudeChat(prompt);
@@ -1134,16 +1133,38 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private static String detailedError(Throwable error) {
+            String message = readableError(error);
+            String detail = formatErrorDetail(message);
             StringWriter writer = new StringWriter();
             error.printStackTrace(new PrintWriter(writer));
             String stack = writer.toString();
             String[] lines = stack.split("\\R");
-            StringBuilder builder = new StringBuilder(readableError(error));
+            StringBuilder builder = new StringBuilder(detail);
             builder.append("\n\n堆栈摘要：");
-            for (int i = 1; i < Math.min(lines.length, 12); i++) {
+            for (int i = 1; i < Math.min(lines.length, 8); i++) {
                 builder.append("\n").append(lines[i].trim());
             }
             return builder.toString();
+        }
+
+        private static String formatErrorDetail(String value) {
+            if (value == null || value.isBlank()) {
+                return "未知错误";
+            }
+            Matcher alertMatcher = Pattern.compile("alert\\s*\\(\\s*['\"]([^'\"]+)['\"]", Pattern.CASE_INSENSITIVE).matcher(value);
+            if (alertMatcher.find()) {
+                return alertMatcher.group(1).replace("\\n", "\n").trim();
+            }
+            String cleaned = value
+                    .replaceAll("(?is)<script\\b[\\s\\S]*?</script>", " ")
+                    .replaceAll("(?is)<style\\b[\\s\\S]*?</style>", " ")
+                    .replaceAll("<[^>]+>", " ")
+                    .replaceAll("\\s+", " ")
+                    .trim();
+            if (cleaned.isBlank()) {
+                return value.length() > 800 ? value.substring(0, 797) + "..." : value;
+            }
+            return cleaned.length() > 800 ? cleaned.substring(0, 797) + "..." : cleaned;
         }
 
         private void debugLog(String event, String message) {
@@ -1210,10 +1231,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     applyCardButton(assign, new Color(57, 129, 255));
                     assign.addActionListener(event -> submitWorkflow(bug.id, "assign"));
                     buttons.add(assign);
-                    JButton confirm = new JButton("确认");
-                    applyCardButton(confirm, new Color(35, 170, 135));
-                    confirm.addActionListener(event -> submitWorkflow(bug.id, "confirm"));
-                    buttons.add(confirm);
+                    if (!bug.confirmed) {
+                        JButton confirm = new JButton("确认");
+                        applyCardButton(confirm, new Color(35, 170, 135));
+                        confirm.addActionListener(event -> submitWorkflow(bug.id, "confirm"));
+                        buttons.add(confirm);
+                    }
                     JButton resolve = new JButton("解决");
                     applyCardButton(resolve, BTN_SUCCESS_BG);
                     resolve.addActionListener(event -> submitWorkflow(bug.id, "resolve"));
@@ -1275,7 +1298,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private static String videoSection(List<Attachment> attachments) {
-            List<Attachment> videos = attachments == null ? List.of() : attachments.stream().filter(item -> "video".equals(item.kind)).toList();
+            List<Attachment> videos = attachments == null ? List.of() : attachments.stream().filter(item -> "video".equals(item.kind)).collect(Collectors.toList());
             if (videos.isEmpty()) return "";
             List<String> links = new ArrayList<>();
             for (int i = 0; i < videos.size(); i++) {
@@ -1293,43 +1316,43 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             if (values == null) return List.of();
             return values.stream()
                     .filter(bug -> bug != null && !"resolved".equals(bug.status) && !"closed".equals(bug.status))
-                    .toList();
+                    .collect(Collectors.toList());
         }
 
         private static Color statusColor(String status) {
-            return switch (status) {
-                case "resolved" -> new Color(31, 122, 58);
-                case "closed" -> Color.GRAY;
-                case "active" -> new Color(180, 35, 24);
-                default -> new Color(161, 92, 0);
-            };
+            switch (status) {
+                case "resolved": return new Color(31, 122, 58);
+                case "closed": return Color.GRAY;
+                case "active": return new Color(180, 35, 24);
+                default: return new Color(161, 92, 0);
+            }
         }
 
         private static Color statusBackground(String status) {
-            return switch (status) {
-                case "resolved" -> new JBColor(new Color(237, 248, 241), new Color(31, 50, 38));
-                case "closed" -> new JBColor(new Color(245, 245, 245), new Color(48, 48, 48));
-                case "active" -> new JBColor(new Color(255, 242, 241), new Color(55, 35, 35));
-                default -> new JBColor(new Color(255, 248, 235), new Color(55, 45, 30));
-            };
+            switch (status) {
+                case "resolved": return new JBColor(new Color(237, 248, 241), new Color(31, 50, 38));
+                case "closed": return new JBColor(new Color(245, 245, 245), new Color(48, 48, 48));
+                case "active": return new JBColor(new Color(255, 242, 241), new Color(55, 35, 35));
+                default: return new JBColor(new Color(255, 248, 235), new Color(55, 45, 30));
+            }
         }
 
         private static String statusText(String status) {
-            return switch (status) {
-                case "active" -> "激活";
-                case "resolved" -> "已解决";
-                case "closed" -> "已关闭";
-                default -> "未知";
-            };
+            switch (status) {
+                case "active": return "激活";
+                case "resolved": return "已解决";
+                case "closed": return "已关闭";
+                default: return "未知";
+            }
         }
 
         private static String priorityText(String priority) {
-            return switch (priority) {
-                case "high" -> "高";
-                case "medium" -> "中";
-                case "low" -> "低";
-                default -> "未知";
-            };
+            switch (priority) {
+                case "high": return "高";
+                case "medium": return "中";
+                case "low": return "低";
+                default: return "未知";
+            }
         }
 
         private static String assigneeText(String assignee) {
@@ -1364,20 +1387,98 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
-        private record Item(String id, String name) {
+        private static final class Item {
+            final String id;
+            final String name;
+
+            Item(String id, String name) {
+                this.id = id;
+                this.name = name;
+            }
+
             @Override
             public String toString() {
                 return name.equals(id) ? id : name + " | " + id;
             }
         }
 
-        private record BugSummary(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, boolean hasVideo) {}
-        private record Attachment(String name, String url, String kind) {}
-        private record BugDetail(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, String description, String descriptionHtml, String reproduceSteps, String reproduceStepsHtml, String expectedResult, String expectedResultHtml, String actualResult, List<Attachment> attachments, List<String> promptImages) {}
+        private static final class BugSummary {
+            final String id;
+            final String title;
+            final String priority;
+            final String status;
+            final String createdAt;
+            final String assignedTo;
+            final String openedBy;
+            final boolean hasVideo;
+            final boolean confirmed;
+
+            BugSummary(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, boolean hasVideo, boolean confirmed) {
+                this.id = id;
+                this.title = title;
+                this.priority = priority;
+                this.status = status;
+                this.createdAt = createdAt;
+                this.assignedTo = assignedTo;
+                this.openedBy = openedBy;
+                this.hasVideo = hasVideo;
+                this.confirmed = confirmed;
+            }
+        }
+
+        private static final class Attachment {
+            final String name;
+            final String url;
+            final String kind;
+
+            Attachment(String name, String url, String kind) {
+                this.name = name;
+                this.url = url;
+                this.kind = kind;
+            }
+        }
+
+        private static final class BugDetail {
+            final String id;
+            final String title;
+            final String priority;
+            final String status;
+            final String createdAt;
+            final String assignedTo;
+            final String openedBy;
+            final String description;
+            final String descriptionHtml;
+            final String reproduceSteps;
+            final String reproduceStepsHtml;
+            final String expectedResult;
+            final String expectedResultHtml;
+            final String actualResult;
+            final List<Attachment> attachments;
+            final List<String> promptImages;
+
+            BugDetail(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, String description, String descriptionHtml, String reproduceSteps, String reproduceStepsHtml, String expectedResult, String expectedResultHtml, String actualResult, List<Attachment> attachments, List<String> promptImages) {
+                this.id = id;
+                this.title = title;
+                this.priority = priority;
+                this.status = status;
+                this.createdAt = createdAt;
+                this.assignedTo = assignedTo;
+                this.openedBy = openedBy;
+                this.description = description;
+                this.descriptionHtml = descriptionHtml;
+                this.reproduceSteps = reproduceSteps;
+                this.reproduceStepsHtml = reproduceStepsHtml;
+                this.expectedResult = expectedResult;
+                this.expectedResultHtml = expectedResultHtml;
+                this.actualResult = actualResult;
+                this.attachments = attachments;
+                this.promptImages = promptImages;
+            }
+        }
 
         private static final class PromptBuilder {
             private static String build(BugDetail bug) {
-                List<String> images = safePromptImages(bug).stream().limit(32).toList();
+                List<String> images = safePromptImages(bug).stream().limit(32).collect(Collectors.toList());
                 String imageText = images.isEmpty() ? "未提供" : indexedImages(images, "");
                 String description = textOrFallback(bug.description, bug.title);
                 String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
@@ -1388,7 +1489,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 List<String> sections = new ArrayList<>();
                 for (int i = 0; i < bugs.size(); i++) {
                     BugDetail bug = bugs.get(i);
-                    List<String> images = safePromptImages(bug).stream().limit(32).toList();
+                    List<String> images = safePromptImages(bug).stream().limit(32).collect(Collectors.toList());
                     String imageText = images.isEmpty() ? "  未提供" : indexedImages(images, "  ");
                     String description = textOrFallback(bug.description, bug.title);
                     String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
@@ -1596,15 +1697,16 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 List<BugSummary> bugRows = listBugs(projectId, "all", "", "");
                 for (BugSummary bug : bugRows) if (!bug.assignedTo.isBlank()) result.put(bug.assignedTo, new Item(bug.assignedTo, bug.assignedTo));
                 Collator collator = Collator.getInstance(Locale.CHINA);
-                return result.values().stream().sorted((left, right) -> collator.compare(left.name, right.name)).toList();
+                return result.values().stream().sorted((left, right) -> collator.compare(left.name, right.name)).collect(Collectors.toList());
             }
 
             private List<BugSummary> listBugs(String projectId, String scope, String assignee, String account) throws Exception {
-                String assignedTo = switch (scope) {
-                    case "all" -> "";
-                    case "member" -> assignee;
-                    default -> account;
-                };
+                String assignedTo;
+                switch (scope) {
+                    case "all": assignedTo = ""; break;
+                    case "member": assignedTo = assignee; break;
+                    default: assignedTo = account;
+                }
                 for (Map<String, String> param : bugParams(projectId, assignedTo)) {
                     List<BugSummary> parsed = parseBugs(get("index.php", param, false), assignedTo);
                     if (!parsed.isEmpty()) return parsed;
@@ -1626,7 +1728,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     } catch (Exception ignored) {
                         // Keep list rendering fast and resilient if one detail page is not accessible.
                     }
-                    result.add(new BugSummary(bug.id, bug.title, bug.priority, bug.status, bug.createdAt, bug.assignedTo, bug.openedBy, hasVideo));
+                    result.add(new BugSummary(bug.id, bug.title, bug.priority, bug.status, bug.createdAt, bug.assignedTo, bug.openedBy, hasVideo, bug.confirmed));
                 }
                 return result;
             }
@@ -1711,11 +1813,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private void submitWorkflow(String bugId, String action, String assignee, String solution, String comment, List<Item> members) throws Exception {
-                String endpoint = switch (action) {
-                    case "assign" -> "assignTo";
-                    case "confirm" -> "confirmBug";
-                    default -> action;
-                };
+                String endpoint;
+                switch (action) {
+                    case "assign": endpoint = "assignTo"; break;
+                    case "confirm": endpoint = "confirmBug"; break;
+                    default: endpoint = action;
+                }
                 String formPath = "index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId) + "&onlybody=yes";
                 String formHtml = get("index.php", Map.of("m", "bug", "f", endpoint, "bugID", bugId, "onlybody", "yes"), false);
                 String submitPath = readFormAction(formHtml, "index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId));
@@ -1732,19 +1835,40 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     assignForm.put("comment", safeComment);
                     form = assignForm;
                 } else if (action.equals("resolve")) {
-                    form.put("comment", safeComment);
-                    form.put("remark", safeComment);
-                    form.put("comment[]", safeComment);
-                    form.putIfAbsent("mailto", "");
-                    form.put("resolution", solution == null || solution.isBlank() ? "fixed" : solution);
-                    form.put("resolvedBuild", "trunk");
-                    form.put("resolvedDate", formatZenTaoDate(new java.util.Date()));
+                    // Match web submit payload: resolution/duplicateBug/buildExecution/resolvedBuild/buildName/resolvedDate/assignedTo/status/comment/uid.
+                    Map<String, String> resolveForm = new LinkedHashMap<>();
+                    resolveForm.put("resolution", nonBlank(solution) != null ? solution : form.getOrDefault("resolution", "fixed"));
+                    resolveForm.put("duplicateBug", form.getOrDefault("duplicateBug", "0"));
+                    resolveForm.put("buildExecution", form.getOrDefault("buildExecution", "0"));
+                    String resolvedBuild = nonBlank(form.get("resolvedBuild"));
+                    if (resolvedBuild == null) {
+                        resolvedBuild = readSelectFieldValue(formHtml, "resolvedBuild");
+                    }
+                    resolveForm.put("resolvedBuild", resolvedBuild == null || resolvedBuild.isBlank() ? "trunk" : resolvedBuild);
+                    resolveForm.put("buildName", form.getOrDefault("buildName", ""));
+                    resolveForm.put("resolvedDate", formatZenTaoDate(new java.util.Date()));
+                    if (form.containsKey("assignedTo")) resolveForm.put("assignedTo", form.get("assignedTo"));
+                    resolveForm.put("status", "resolved");
+                    if (form.containsKey("uid")) resolveForm.put("uid", form.get("uid"));
+                    resolveForm.put("comment", safeComment);
+                    form = resolveForm;
                 } else if (action.equals("confirm")) {
-                    form.put("comment", safeComment);
-                    form.put("remark", safeComment);
-                    form.put("comment[]", safeComment);
-                    form.putIfAbsent("mailto", "");
-                    form.put("confirmed", "1");
+                    // Match web submit payload: assignedTo/type/pri/status/comment/uid.
+                    Map<String, String> confirmForm = new LinkedHashMap<>();
+                    for (String key : new String[] {"assignedTo", "type", "pri", "status", "uid"}) {
+                        if (form.containsKey(key)) confirmForm.put(key, form.get(key));
+                    }
+                    confirmForm.put("comment", safeComment);
+                    form = confirmForm;
+                } else if (action.equals("activate")) {
+                    // Match web submit payload: assignedTo/status/openedBuild[]/comment/uid.
+                    Map<String, String> activateForm = new LinkedHashMap<>();
+                    if (form.containsKey("assignedTo")) activateForm.put("assignedTo", form.get("assignedTo"));
+                    activateForm.put("status", "active");
+                    if (form.containsKey("openedBuild[]")) activateForm.put("openedBuild[]", form.get("openedBuild[]"));
+                    if (form.containsKey("uid")) activateForm.put("uid", form.get("uid"));
+                    activateForm.put("comment", safeComment);
+                    form = activateForm;
                 } else if (action.equals("close")) {
                     form.put("comment", safeComment);
                     form.put("remark", safeComment);
@@ -1767,8 +1891,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     submitParams = new LinkedHashMap<>(submitParams);
                     submitParams.put("bugID", bugId);
                 }
-                boolean ajax = !action.equals("assign");
+                boolean ajax = !action.equals("assign") && !action.equals("confirm") && !action.equals("resolve") && !action.equals("activate");
                 String body = post(submitPath, submitParams, form, formPath, ajax);
+                String workflowError = extractWorkflowResponseError(body);
+                if (workflowError != null) {
+                    throw new IllegalStateException("禅道未接受该工作流提交：" + workflowError);
+                }
                 if (body.contains("\"result\":\"fail\"") || body.contains("error")) {
                     throw new IllegalStateException("禅道未接受该工作流提交，请在网页确认必填字段。");
                 }
@@ -1779,16 +1907,29 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 BugDetail detail = getBugDetail(bugId);
                 String currentStatus = detail.status;
                 String currentAssignee = detail.assignedTo;
-                boolean ok = switch (action) {
-                    case "assign" -> matchesAssignee(currentAssignee, assignee, members) || matchesAssignee(currentAssignee, submittedAssignee, members);
-                    case "resolve" -> "resolved".equals(currentStatus);
-                    case "close" -> "closed".equals(currentStatus);
-                    case "activate" -> "active".equals(currentStatus);
-                    case "confirm" -> htmlText(get("index.php", Map.of("m", "bug", "f", "view", "bugID", bugId), false)).matches("(?is).*已确认.*|.*confirmed.*");
-                    default -> true;
-                };
+                boolean ok;
+                switch (action) {
+                    case "assign":
+                        ok = matchesAssignee(currentAssignee, assignee, members) || matchesAssignee(currentAssignee, submittedAssignee, members);
+                        break;
+                    case "resolve":
+                        ok = "resolved".equals(currentStatus);
+                        break;
+                    case "close":
+                        ok = "closed".equals(currentStatus);
+                        break;
+                    case "activate":
+                        ok = "active".equals(currentStatus);
+                        break;
+                    case "confirm":
+                        ok = htmlText(get("index.php", Map.of("m", "bug", "f", "view", "bugID", bugId), false)).matches("(?is).*已确认.*|.*confirmed.*");
+                        break;
+                    default:
+                        ok = true;
+                }
                 if (!ok) {
-                    throw new IllegalStateException("禅道" + workflowActionName(action) + "后校验未生效。当前状态：" + statusText(currentStatus) + "，当前指派：" + (currentAssignee.isBlank() ? "未知" : normalizeDetailField(currentAssignee)) + "，目标指派：" + (assignee == null ? "" : assignee) + "，提交值：" + (submittedAssignee == null ? "" : submittedAssignee) + "。响应摘要：" + htmlText(responseBody).replaceAll("\\s+", " ").substring(0, Math.min(300, htmlText(responseBody).replaceAll("\\s+", " ").length())));
+                    String hint = extractWorkflowResponseError(responseBody);
+                    throw new IllegalStateException("禅道" + workflowActionName(action) + "后校验未生效。当前状态：" + statusText(currentStatus) + "，当前指派：" + (currentAssignee.isBlank() ? "未知" : normalizeDetailField(currentAssignee)) + "，目标指派：" + (assignee == null ? "" : assignee) + "，提交值：" + (submittedAssignee == null ? "" : submittedAssignee) + (hint == null ? "" : "。" + hint));
                 }
             }
 
@@ -1851,21 +1992,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private List<BugSummary> parseBugs(String html, String assignedTo) {
                 List<String> rows = matches(html, "<tr\\b[\\s\\S]*?</tr>");
-                List<String> header = rows.stream().filter(row -> htmlText(row).matches(".*(Bug标题|标题|指派给|创建者|提交者).*")).findFirst().map(row -> matches(row, "<t[dh]\\b[\\s\\S]*?</t[dh]>").stream().map(ZenTaoClient::htmlText).toList()).orElse(List.of());
+                List<String> header = rows.stream().filter(row -> htmlText(row).matches(".*(Bug标题|标题|指派给|创建者|提交者).*")).findFirst().map(row -> matches(row, "<t[dh]\\b[\\s\\S]*?</t[dh]>").stream().map(ZenTaoClient::htmlText).collect(Collectors.toList())).orElse(List.of());
                 int titleIndex = indexOf(header, "Bug标题|标题");
                 int openedIndex = indexOf(header, "创建者|由谁创建|提交者");
                 int createdIndex = indexOf(header, "创建日期|创建时间");
                 int assignedIndex = indexOf(header, "指派给");
+                int confirmedIndex = indexOf(header, "确认");
                 List<BugSummary> result = new ArrayList<>();
                 for (String row : rows) {
-                    List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).toList();
+                    List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).collect(Collectors.toList());
                     String id = cells.stream().filter(cell -> cell.matches("#?\\d+")).findFirst().orElse("").replace("#", "");
                     if (id.isBlank()) continue;
                     String bugLink = matches(row, "<a\\b[^>]*href=[\"'][^\"']*(?:m=bug[^\"']*f=view|bug[-/]view|bug-view)[^\"']*[\"'][^>]*>[\\s\\S]*?</a>").stream().findFirst().orElse("");
                     String linkText = htmlText(bugLink);
                     String title = cell(cells, titleIndex);
                     if (title.isBlank() || title.matches("#?\\d+")) title = !linkText.isBlank() && !linkText.equals(id) && !linkText.matches("#?\\d+") ? linkText : cells.stream().filter(cell -> isLikelyBugTitleCell(cell, id)).findFirst().orElse("Bug #" + id);
-                    result.add(new BugSummary(id, title, parsePriority(String.join(" ", cells)), parseStatus(String.join(" ", cells)), cell(cells, createdIndex), cell(cells, assignedIndex).isBlank() ? assignedTo : cell(cells, assignedIndex), cell(cells, openedIndex), looksLikeVideo(String.join(" ", cells))));
+                    boolean confirmed = isConfirmedText(cell(cells, confirmedIndex)) || cells.stream().anyMatch(ZenTaoClient::isConfirmedText);
+                    result.add(new BugSummary(id, title, parsePriority(String.join(" ", cells)), parseStatus(String.join(" ", cells)), cell(cells, createdIndex), cell(cells, assignedIndex).isBlank() ? assignedTo : cell(cells, assignedIndex), cell(cells, openedIndex), looksLikeVideo(String.join(" ", cells)), confirmed));
                 }
                 Map<String, BugSummary> deduped = new LinkedHashMap<>();
                 for (BugSummary bug : result) deduped.putIfAbsent(bug.id, bug);
@@ -2000,7 +2143,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                             result.put(account, new Item(account, name.equals(account) ? account : name + " (" + account + ")"));
                         }
                     }
-                    List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).toList();
+                    List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).collect(Collectors.toList());
                     for (String cell : cells) {
                         if (cell.matches("[A-Za-z][A-Za-z0-9_.-]{1,40}") && !isIgnoredMember(cell, cell)) {
                             result.putIfAbsent(cell, new Item(cell, cell));
@@ -2164,6 +2307,43 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return matcher.find() ? attr(matcher.group(), "value") : fallback;
             }
 
+            private static String nonBlank(String value) {
+                if (value == null || value.isBlank()) return null;
+                return value.trim();
+            }
+
+            private static String readSelectFieldValue(String html, String name) {
+                for (String select : matches(html, "<select\\b[^>]*\\bname=[\"']" + Pattern.quote(name) + "[\"'][^>]*>[\\s\\S]*?</select>")) {
+                    String fallback = "";
+                    for (String option : matches(select, "<option\\b[^>]*>[\\s\\S]*?</option>")) {
+                        String value = attr(option, "value");
+                        if (value == null || value.isBlank()) continue;
+                        if (option.matches("(?is).*\\sselected(?:\\s|=|>).*")) {
+                            return value.trim();
+                        }
+                        if (fallback.isBlank()) fallback = value.trim();
+                    }
+                    if (!fallback.isBlank()) return fallback;
+                }
+                return null;
+            }
+
+            private static String extractWorkflowResponseError(String body) {
+                if (body == null || body.isBlank()) return null;
+                Matcher alertMatcher = Pattern.compile("alert\\s*\\(\\s*['\"]([^'\"]+)['\"]", Pattern.CASE_INSENSITIVE).matcher(body);
+                if (alertMatcher.find()) {
+                    return alertMatcher.group(1).replace("\\n", " ").replaceAll("\\s+", " ").trim();
+                }
+                if (body.contains("\"result\":\"fail\"")) {
+                    return "禅道返回失败结果";
+                }
+                String text = htmlText(body);
+                if (text.matches("(?is).*(不能为空|必填|请选择|失败|错误).*") && text.length() <= 240) {
+                    return text;
+                }
+                return null;
+            }
+
             private static Map<String, String> readFormInputs(String html) {
                 Map<String, String> result = new LinkedHashMap<>();
                 for (String input : matches(html, "<input\\b[^>]*>")) {
@@ -2224,19 +2404,34 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     }
                     char next = value.charAt(++i);
                     switch (next) {
-                        case 'n' -> builder.append('\n');
-                        case 'r' -> builder.append('\r');
-                        case 't' -> builder.append('\t');
-                        case 'b' -> builder.append('\b');
-                        case 'f' -> builder.append('\f');
-                        case '"', '\\', '/' -> builder.append(next);
-                        case 'u' -> {
+                        case 'n':
+                            builder.append('\n');
+                            break;
+                        case 'r':
+                            builder.append('\r');
+                            break;
+                        case 't':
+                            builder.append('\t');
+                            break;
+                        case 'b':
+                            builder.append('\b');
+                            break;
+                        case 'f':
+                            builder.append('\f');
+                            break;
+                        case '"':
+                        case '\\':
+                        case '/':
+                            builder.append(next);
+                            break;
+                        case 'u':
                             if (i + 4 < value.length()) {
                                 builder.append((char) Integer.parseInt(value.substring(i + 1, i + 5), 16));
                                 i += 4;
                             }
-                        }
-                        default -> builder.append(next);
+                            break;
+                        default:
+                            builder.append(next);
                     }
                 }
                 return builder.toString();
@@ -2527,19 +2722,49 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static String workflowActionName(String action) {
-                return switch (action) {
-                    case "assign" -> "指派";
-                    case "confirm" -> "确认";
-                    case "resolve" -> "解决";
-                    case "close" -> "关闭";
-                    case "activate" -> "激活";
-                    default -> action;
-                };
+                switch (action) {
+                    case "assign": return "指派";
+                    case "confirm": return "确认";
+                    case "resolve": return "解决";
+                    case "close": return "关闭";
+                    case "activate": return "激活";
+                    default: return action;
+                }
             }
 
-            private record DetailSections(String descriptionHtml, String reproduceStepsHtml, String expectedResultHtml) {}
-            private record Marker(int index, int end) {}
-            private record MemberSource(String path, Map<String, String> params, boolean ajax) {}
+            private static final class DetailSections {
+                final String descriptionHtml;
+                final String reproduceStepsHtml;
+                final String expectedResultHtml;
+
+                DetailSections(String descriptionHtml, String reproduceStepsHtml, String expectedResultHtml) {
+                    this.descriptionHtml = descriptionHtml;
+                    this.reproduceStepsHtml = reproduceStepsHtml;
+                    this.expectedResultHtml = expectedResultHtml;
+                }
+            }
+
+            private static final class Marker {
+                final int index;
+                final int end;
+
+                Marker(int index, int end) {
+                    this.index = index;
+                    this.end = end;
+                }
+            }
+
+            private static final class MemberSource {
+                final String path;
+                final Map<String, String> params;
+                final boolean ajax;
+
+                MemberSource(String path, Map<String, String> params, boolean ajax) {
+                    this.path = path;
+                    this.params = params;
+                    this.ajax = ajax;
+                }
+            }
 
             private List<Attachment> parseAttachments(String html) {
                 List<Attachment> result = new ArrayList<>();
@@ -2585,6 +2810,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (value.matches("(?is).*(关闭|closed).*")) return "closed";
                 if (value.matches("(?is).*(激活|active).*")) return "active";
                 return "unknown";
+            }
+
+            private static boolean isConfirmedText(String value) {
+                if (value == null || value.isBlank()) return false;
+                return value.matches("(?is).*(已确认|confirmed).*");
             }
 
             private static String htmlText(String value) {

@@ -6,17 +6,28 @@ node_modules/
 vscode-plugin/dist/
 vscode-plugin/out/
 vscode-plugin/*.vsix
-vscode-plugin/.vscode/
 
 # IntelliJ plugin outputs
 intellij-plugin/build/
 intellij-plugin/out/
 intellij-plugin/.gradle/
 intellij-plugin/.intellijPlatform/
-intellij-plugin/*.iml
+
+# Gradle (keep wrapper scripts and gradle-wrapper.jar)
+.gradle/
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
 
 # Local tool bootstrap cache
 .tools/
+
+# Parallel build script outputs
+build-logs/
+
+# Local debug / agent artifacts
+preview-debug-*.json
+*-debug-*.json
+agent-tools/
 
 # IDE and editor state
 .idea/
@@ -36,11 +47,9 @@ Thumbs.db
 
 # Archives and packaged binaries
 *.zip
-*.jar
 
-# Keep Gradle Wrapper files if they are added later
-!gradle/wrapper/gradle-wrapper.jar
-!**/gradle/wrapper/gradle-wrapper.jar
+# Java compile outputs
+*.class
 
 # Local secrets
 .env

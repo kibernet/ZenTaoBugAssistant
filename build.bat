@@ -7,7 +7,7 @@ set "ROOT_DIR=%ROOT_DIR:~0,-1%"
 set "INTELLIJ_DIR=%ROOT_DIR%\intellij-plugin"
 set "VSCODE_DIR=%ROOT_DIR%\vscode-plugin"
 set "TOOLS_DIR=%ROOT_DIR%\.tools"
-set "GRADLE_VERSION=9.0.0"
+set "GRADLE_VERSION=8.13"
 set "NODE_VERSION=20.19.0"
 
 if /i "%~1"=="__build_intellij" (
@@ -156,7 +156,11 @@ if errorlevel 1 call :ensure_gradle || exit /b %ERRORLEVEL%
 
 pushd "%INTELLIJ_DIR%" || exit /b 1
 if exist build\distributions\*.zip del /q build\distributions\*.zip
-call gradle --no-daemon --console=plain clean buildPlugin
+if exist gradlew.bat (
+    call gradlew.bat --no-daemon --console=plain clean buildPlugin
+) else (
+    call gradle --no-daemon --console=plain clean buildPlugin
+)
 set "BUILD_CODE=%ERRORLEVEL%"
 popd
 if not "%BUILD_CODE%"=="0" (

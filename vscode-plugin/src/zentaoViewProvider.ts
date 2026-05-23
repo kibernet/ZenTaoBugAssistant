@@ -822,7 +822,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
           "不再弹出"
         );
         if (choice === "查看详情") {
-          await vscode.window.showErrorMessage(`禅道助手详细错误：${message}`, { modal: true });
+          await vscode.window.showErrorMessage(`禅道助手详细错误：${formatErrorDetail(message)}`, { modal: true });
         } else if (choice === "不再弹出") {
           await this.context.globalState.update(ZenTaoBugAssistantViewProvider.suppressErrorPopupKey, true);
           vscode.window.showInformationMessage("已关闭失败弹窗提示，可在命令面板执行“ZenTao: 启用失败弹窗”恢复。");
@@ -1121,18 +1121,34 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 }
 
 function briefErrorMessage(value: string): string {
-  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  const text = formatErrorDetail(value).replace(/\s+/g, " ").trim();
   if (!text) {
     return "未知错误";
   }
   const shortened = text
     .replace(/响应摘要：.*$/i, "")
-    .replace(/<!DOCTYPE html[\s\S]*$/i, "")
     .trim();
   if (shortened.length <= 120) {
     return shortened;
   }
   return `${shortened.slice(0, 117)}...`;
+}
+
+function formatErrorDetail(value: string): string {
+  const alertMatch = value.match(/alert\s*\(\s*['"]([^'"]+)['"]/i);
+  if (alertMatch?.[1]) {
+    return alertMatch[1].replace(/\\n/g, "\n").trim();
+  }
+  const cleaned = (value ?? "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "未知错误";
+  }
+  return cleaned.length > 800 ? `${cleaned.slice(0, 797)}...` : cleaned;
 }
 
 async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
@@ -1277,7 +1293,7 @@ function normalizeBugCategoryFilters(value: string[] | undefined): string[] {
     return allowed;
   }
   const selected = value.filter((item) => allowed.includes(item));
-  return [...new Set(selected)];
+  return selected.length ? [...new Set(selected)] : allowed;
 }
 
 function memberFilterCandidates(account: string | undefined, member: ZenTaoMember | undefined): string[] {

@@ -1,8 +1,6 @@
-import org.jetbrains.intellij.platform.gradle.TestFrameworkType
-
 plugins {
     id("java")
-    id("org.jetbrains.intellij.platform") version "2.16.0"
+    id("org.jetbrains.intellij") version "1.17.4"
 }
 
 group = "com.zentao.bugassistant"
@@ -11,30 +9,24 @@ version = "1.0.0"
 repositories {
     maven { url = uri("https://maven.aliyun.com/repository/public") }
     mavenCentral()
-    intellijPlatform {
-        defaultRepositories()
-    }
 }
 
 java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
-    }
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
 }
 
-dependencies {
-    intellijPlatform {
-        intellijIdeaCommunity("2025.1.7")
-        testFramework(TestFrameworkType.Platform)
-    }
+intellij {
+    version.set("2021.3.3")
+    type.set("IC")
+    updateSinceUntilBuild.set(false)
 }
 
-intellijPlatform {
-    buildSearchableOptions = false
-
-    pluginConfiguration {
-        ideaVersion {
-            sinceBuild = "241"
-        }
+tasks {
+    patchPluginXml {
+        sinceBuild.set("211")
+    }
+    buildSearchableOptions {
+        enabled = false
     }
 }

@@ -449,6 +449,12 @@ export class ZenTaoClient {
     let submitForm = form;
     if (request.action === "assign") {
       submitForm = buildAssignWorkflowForm(form, request);
+    } else if (request.action === "confirm") {
+      submitForm = buildConfirmWorkflowForm(form, request);
+    } else if (request.action === "resolve") {
+      submitForm = buildResolveWorkflowForm(form, request, formHtml);
+    } else if (request.action === "activate") {
+      submitForm = buildActivateWorkflowForm(form, request);
     } else {
       for (const [key, value] of buildWorkflowForm(request)) {
         submitForm.set(key, value);
@@ -476,7 +482,7 @@ export class ZenTaoClient {
         Origin: this.buildUrl("/").origin
       },
       params: submitParams,
-      ajax: request.action === "assign" ? false : undefined
+      ajax: request.action === "assign" || request.action === "confirm" || request.action === "resolve" || request.action === "activate" ? false : undefined
     });
     const responseText = await response.text().catch(() => "");
     // #region agent log
@@ -489,6 +495,10 @@ export class ZenTaoClient {
       preview: compactText(responseText).slice(0, 300)
     });
     // #endregion
+    const responseError = extractWorkflowResponseError(responseText);
+    if (responseError) {
+      throw new Error(`禅道未接受该工作流提交：${responseError}`);
+    }
     await this.verifyWorkflowEffect(request, responseText);
   }
 
@@ -502,7 +512,8 @@ export class ZenTaoClient {
       (request.action === "activate" && detail.status === "active") ||
       (request.action === "confirm" && detail.confirmed === true);
     if (!ok) {
-      throw new Error(`禅道${workflowActionName(request.action)}后校验未生效。当前状态：${detail.status || "未知"}，当前指派：${detail.assignedTo || "未知"}。响应摘要：${compactText(responseText).slice(0, 300)}`);
+      const hint = extractWorkflowResponseError(responseText);
+      throw new Error(`禅道${workflowActionName(request.action)}后校验未生效。当前状态：${detail.status || "未知"}，当前指派：${detail.assignedTo || "未知"}${hint ? `。${hint}` : ""}`);
     }
   }
 
@@ -842,6 +853,55 @@ function buildAssignWorkflowForm(source: URLSearchParams, request: BugWorkflowRe
   return form;
 }
 
+function buildConfirmWorkflowForm(source: URLSearchParams, request: BugWorkflowRequest): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const key of ["assignedTo", "type", "pri", "status", "uid"]) {
+    if (source.has(key)) {
+      form.set(key, source.get(key) ?? "");
+    }
+  }
+  form.set("comment", request.comment ?? "");
+  return form;
+}
+
+function buildResolveWorkflowForm(source: URLSearchParams, request: BugWorkflowRequest, formHtml: string): URLSearchParams {
+  const form = new URLSearchParams();
+  form.set("resolution", nonBlank(request.solution) ?? nonBlank(source.get("resolution")) ?? "fixed");
+  form.set("duplicateBug", nonBlank(source.get("duplicateBug")) ?? "0");
+  form.set("buildExecution", nonBlank(source.get("buildExecution")) ?? "0");
+  form.set(
+    "resolvedBuild",
+    nonBlank(request.resolvedBuild) ?? nonBlank(source.get("resolvedBuild")) ?? readSelectFieldValue(formHtml, "resolvedBuild") ?? "trunk"
+  );
+  form.set("buildName", nonBlank(source.get("buildName")) ?? "");
+  form.set("resolvedDate", formatZenTaoDate(new Date()));
+  if (source.has("assignedTo")) {
+    form.set("assignedTo", source.get("assignedTo") ?? "");
+  }
+  form.set("status", "resolved");
+  if (source.has("uid")) {
+    form.set("uid", source.get("uid") ?? "");
+  }
+  form.set("comment", request.comment ?? "");
+  return form;
+}
+
+function buildActivateWorkflowForm(source: URLSearchParams, request: BugWorkflowRequest): URLSearchParams {
+  const form = new URLSearchParams();
+  if (source.has("assignedTo")) {
+    form.set("assignedTo", source.get("assignedTo") ?? "");
+  }
+  form.set("status", "active");
+  if (source.has("openedBuild[]")) {
+    form.set("openedBuild[]", source.get("openedBuild[]") ?? "");
+  }
+  if (source.has("uid")) {
+    form.set("uid", source.get("uid") ?? "");
+  }
+  form.set("comment", request.comment ?? "");
+  return form;
+}
+
 function readWorkflowFormFields(html: string): URLSearchParams {
   const form = new URLSearchParams();
   for (const input of matchAll(html, /<input\b[^>]*>/gi)) {
@@ -865,6 +925,54 @@ function readWorkflowFormFields(html: string): URLSearchParams {
 function readFormAction(html: string): string | undefined {
   const form = html.match(/<form\b[^>]*>/i)?.[0];
   return form ? readAttr(form, "action")?.replace(/&amp;/g, "&") : undefined;
+}
+
+function nonBlank(value?: string | null): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed || undefined;
+}
+
+function readSelectFieldValue(html: string, name: string): string | undefined {
+  const select = html.match(new RegExp(`<select\\b[^>]*\\bname=["']${escapeRegExp(name)}["'][^>]*>[\\s\\S]*?<\\/select>`, "i"))?.[0];
+  if (!select) {
+    return undefined;
+  }
+  const options = matchAll(select, /<option\b[^>]*>[\s\S]*?<\/option>/gi);
+  for (const option of options) {
+    if (!/\sselected(?:\s|=|>)/i.test(option)) {
+      continue;
+    }
+    const value = nonBlank(readAttr(option, "value"));
+    if (value) {
+      return value;
+    }
+  }
+  for (const option of options) {
+    const value = nonBlank(readAttr(option, "value"));
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function extractWorkflowResponseError(value: string): string | undefined {
+  const alertMatch = value.match(/alert\s*\(\s*['"]([^'"]+)['"]/i);
+  if (alertMatch?.[1]) {
+    return alertMatch[1].replace(/\\n/g, " ").replace(/\s+/g, " ").trim();
+  }
+  const parsed = parseLoginResult(value);
+  if (parsed?.result === "fail" && parsed.message) {
+    return parsed.message.trim();
+  }
+  if (value.includes('"result":"fail"')) {
+    return "禅道返回失败结果";
+  }
+  const text = htmlText(value);
+  if (/不能为空|必填|请选择|失败|错误/i.test(text) && text.length <= 240) {
+    return text;
+  }
+  return undefined;
 }
 
 function containsPerson(value: string | undefined, expected: string | undefined): boolean {
@@ -1171,7 +1279,7 @@ function parseBugRow(row: string, assignedTo?: string, columns: BugColumns = {})
     createdAt: readCell(cells, columns.createdAt) ?? cells.find((cell) => /\d{4}-\d{2}-\d{2}|\d{2}-\d{2}/.test(cell)),
     assignedTo: assigneeFromRow ?? assignedTo,
     openedBy: readCell(cells, columns.openedBy),
-    confirmed: readCell(cells, columns.confirmed)?.includes("已确认")
+    confirmed: isConfirmedText(readCell(cells, columns.confirmed)) || cells.some((cell) => isConfirmedText(cell))
   };
 }
 
@@ -1199,6 +1307,13 @@ function readCell(cells: string[], index: number | undefined): string | undefine
   }
   const value = cells[index]?.trim();
   return value || undefined;
+}
+
+function isConfirmedText(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  return /已确认|confirmed/i.test(value.trim());
 }
 
 function isLikelyBugTitleCell(value: string, id: string): boolean {

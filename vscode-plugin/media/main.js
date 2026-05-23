@@ -90,7 +90,10 @@ function render(state) {
   document.getElementById("bugCount").textContent = `共 ${filteredBugs.length} 个 Bug / 总 ${state.bugs.length} 个`;
 
   if (!pageBugs.length) {
-    root.innerHTML = `<p class="empty">当前分类暂无 Bug。</p>`;
+    const filterHint = state.bugs.length
+      ? `已拉取 ${state.bugs.length} 个 Bug，当前筛选条件下无匹配项。请勾选「全部」或「未解决」后重试。`
+      : "当前分类暂无 Bug。";
+    root.innerHTML = `<p class="empty">${escapeHtml(filterHint)}</p>`;
     renderPagination(filteredBugs.length, currentBugPage, totalPages);
     return;
   }
@@ -333,9 +336,11 @@ function renderBugButtons(bug) {
   } else if (bug.status === "closed") {
     buttons.push({ workflow: "activate", label: "激活" });
   } else {
+    buttons.push({ workflow: "assign", label: "指派" });
+    if (!bug.confirmed) {
+      buttons.push({ workflow: "confirm", label: "确认" });
+    }
     buttons.push(
-      { workflow: "assign", label: "指派" },
-      { workflow: "confirm", label: "确认" },
       { workflow: "resolve", label: "解决" },
       { type: "fix", label: "AI修复" }
     );
