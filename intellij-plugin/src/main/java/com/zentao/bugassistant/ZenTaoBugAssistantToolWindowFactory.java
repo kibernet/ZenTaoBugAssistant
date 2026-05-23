@@ -7,10 +7,11 @@ import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
-import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.wm.ToolWindow;
@@ -28,6 +29,7 @@ import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Image;
+import java.awt.Dimension;
 import java.awt.datatransfer.StringSelection;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -36,26 +38,29 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.text.Collator;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComponent;
-import javax.swing.JEditorPane;
 import javax.swing.ImageIcon;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
-import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingWorker;
 import javax.swing.border.LineBorder;
@@ -64,7 +69,7 @@ import org.jetbrains.annotations.NotNull;
 public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
-        ZenTaoBugAssistantPanel panel = new ZenTaoBugAssistantPanel(project);
+        ZenTaoBugAssistantPanel panel = new ZenTaoBugAssistantPanel(project, toolWindow);
         Content content = ContentFactory.getInstance().createContent(panel.root, "", false);
         toolWindow.getContentManager().addContent(content);
     }
@@ -72,15 +77,16 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
     private static final class ZenTaoBugAssistantPanel {
         private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
         private static final int PAGE_SIZE = 20;
+        private static final int DEFAULT_KEEP_ALIVE_MINUTES = 5;
         private static final List<String> FILTER_KEYS = List.of("assignedToMe", "unresolved", "resolved", "closed");
-        private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Open", "ClaudeCode.Chat", "claude-code.open", "claudeCode.open", "claude-code.chat", "claudeCode.chat");
+        private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Chat", "claude-code.chat", "claudeCode.chat", "ClaudeCode.NewChat", "claude-code.newChat", "claudeCode.newChat", "ClaudeCode.Open", "claude-code.open", "claudeCode.open");
 
         private final Project project;
+        private final ToolWindow toolWindow;
         private final JPanel root = new JPanel(new BorderLayout(8, 8));
         private final JBTextField serverField = new JBTextField(DEFAULT_SERVER);
         private final JBTextField accountField = new JBTextField();
         private final JBPasswordField passwordField = new JBPasswordField();
-        private final JCheckBox rememberPasswordBox = new JCheckBox("记住密码");
         private final JCheckBox autoLoginBox = new JCheckBox("自动登录", true);
         private final JButton loginButton = new JButton("登录");
         private final JLabel loginState = new JLabel("未登录");
@@ -92,6 +98,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final JLabel bugCountLabel = new JLabel("共 0 个 Bug");
         private final JButton refreshButton = new JButton("刷新");
         private final JButton aiFixAllButton = new JButton("AI一键修复");
+        private final JButton clearImageCacheButton = new JButton("清理缓存");
         private final ComboBox<String> aiEngineBox = new ComboBox<>(new String[] {"Claude Code"});
         private final JPanel bugListPanel = new JPanel();
         private final JLabel pageLabel = new JLabel("0/0");
@@ -100,20 +107,26 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final JButton nextPageButton = new JButton(">");
         private final JButton lastPageButton = new JButton(">|");
         private final JTextArea statusArea = new JTextArea("状态：就绪");
+        private final List<String> debugEvents = new ArrayList<>();
         private final ZenTaoClient client = new ZenTaoClient();
         private final List<BugSummary> bugs = new ArrayList<>();
         private final List<Item> projects = new ArrayList<>();
         private final List<Item> members = new ArrayList<>();
+        private ZenTaoPreviewVirtualFile previewFile;
         private String preferredProjectId = "";
         private String preferredMemberAccount = "";
         private int currentPage = 1;
-        private PreviewDialog previewDialog;
+        private javax.swing.Timer keepAliveTimer;
+        private boolean loading = false;
         private boolean hydratingProjects = false;
         private boolean hydratingMembers = false;
         private boolean hydratingFilters = false;
 
-        private ZenTaoBugAssistantPanel(Project project) {
+        private ZenTaoBugAssistantPanel(Project project, ToolWindow toolWindow) {
             this.project = project;
+            this.toolWindow = toolWindow;
+            client.setPromptImageRoot(project.getBasePath());
+            cleanupImageCacheOncePerDay();
             root.setBorder(JBUI.Borders.empty(10));
             root.add(buildTopPanel(), BorderLayout.NORTH);
             root.add(buildCenterPanel(), BorderLayout.CENTER);
@@ -121,9 +134,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             statusArea.setLineWrap(true);
             statusArea.setRows(2);
             root.add(statusArea, BorderLayout.SOUTH);
+            applySettingsDefaults();
             restorePreferences();
             bindEvents();
-            if (autoLoginBox.isSelected() && !accountField.getText().isBlank() && passwordField.getPassword().length > 0) {
+            if (client.loggedIn()) {
+                loginState.setText("已恢复会话：" + accountField.getText());
+                loginButton.setText("重新登录");
+                startSessionKeepAlive();
+                loadProjectsAfterLogin(false);
+            } else if (autoLoginBox.isSelected() && !accountField.getText().isBlank() && passwordField.getPassword().length > 0) {
                 loginAndRefresh();
             }
         }
@@ -144,7 +163,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             addRow(top, c, 3, "禅道密码", passwordField);
             JPanel loginRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
             loginRow.add(autoLoginBox);
-            loginRow.add(rememberPasswordBox);
             loginRow.add(loginButton);
             loginRow.add(loginState);
             c.gridx = 1;
@@ -184,6 +202,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             return top;
         }
 
+        private void cleanupImageCacheOncePerDay() {
+            PropertiesComponent properties = PropertiesComponent.getInstance(project);
+            String today = java.time.LocalDate.now().toString();
+            if (today.equals(properties.getValue("zentao.idea.lastImageCacheCleanup", ""))) return;
+            client.clearPromptImages();
+            properties.setValue("zentao.idea.lastImageCacheCleanup", today, "");
+        }
+
         private JComponent buildHeaderLogo() {
             java.net.URL logo = ZenTaoBugAssistantToolWindowFactory.class.getResource("/META-INF/header-logo.png");
             if (logo == null) {
@@ -200,9 +226,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             JPanel center = new JPanel(new BorderLayout(8, 8));
             JPanel bar = new JPanel(new BorderLayout(8, 0));
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+            compactButton(refreshButton);
+            compactButton(aiFixAllButton);
+            compactButton(clearImageCacheButton);
+            aiEngineBox.setPrototypeDisplayValue("Claude Code");
             actions.add(refreshButton);
             actions.add(aiFixAllButton);
-            aiEngineBox.setEnabled(false);
+            actions.add(clearImageCacheButton);
+            aiEngineBox.setEnabled(true);
             actions.add(aiEngineBox);
             bar.add(bugCountLabel, BorderLayout.WEST);
             bar.add(actions, BorderLayout.EAST);
@@ -218,6 +249,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             pager.add(lastPageButton);
             center.add(pager, BorderLayout.SOUTH);
             return center;
+        }
+
+        private void compactButton(JButton button) {
+            button.setMargin(JBUI.insets(2, 8));
         }
 
         private void addRow(JPanel panel, GridBagConstraints c, int y, String label, JComponent component) {
@@ -247,6 +282,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             loginButton.addActionListener(event -> loginAndRefresh());
             refreshButton.addActionListener(event -> refreshBugs());
             aiFixAllButton.addActionListener(event -> aiFixAll());
+            clearImageCacheButton.addActionListener(event -> clearImageCache());
+            aiEngineBox.addActionListener(event -> savePreferences());
             projectBox.addActionListener(event -> {
                 if (hydratingProjects) return;
                 preferredMemberAccount = "";
@@ -286,14 +323,40 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }, message -> {
                 loginState.setText(message);
                 loginButton.setText("重新登录");
+                savePreferences();
+                startSessionKeepAlive();
                 loadProjectsAfterLogin(false);
             });
         }
 
+        private void applySettingsDefaults() {
+            PropertiesComponent properties = PropertiesComponent.getInstance();
+            serverField.setText(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER));
+            autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
+            aiEngineBox.setSelectedIndex(0);
+        }
+
+        private void startSessionKeepAlive() {
+            if (keepAliveTimer != null) keepAliveTimer.stop();
+            int minutes = Math.max(1, PropertiesComponent.getInstance().getInt("zentao.idea.settings.keepAliveMinutes", DEFAULT_KEEP_ALIVE_MINUTES));
+            keepAliveTimer = new javax.swing.Timer(minutes * 60 * 1000, event -> {
+                if (!client.loggedIn()) return;
+                runAsync("正在保持禅道会话...", () -> {
+                    if (!client.isSessionValid() && canRetryLogin()) {
+                        client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                    }
+                    return true;
+                }, ignored -> savePreferences());
+            });
+            keepAliveTimer.setInitialDelay(minutes * 60 * 1000);
+            keepAliveTimer.start();
+        }
+
         private void loadProjectsAfterLogin(boolean force) {
-            loadProjects(force, () -> loadMembers(false, () ->
-                    statusArea.setText("状态：登录成功，项目 " + projects.size() + " 个，成员 " + members.size() + " 个。请选择项目拉取 Bug。")
-            ));
+            loadProjects(force, () -> loadMembers(false, () -> {
+                setStatus("登录成功，项目 " + projects.size() + " 个，成员 " + members.size() + " 个，正在自动刷新 Bug 列表...");
+                refreshBugs();
+            }));
         }
 
         private void loadProjects(boolean force) {
@@ -302,7 +365,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void loadProjects(boolean force, Runnable afterLoaded) {
             if (!force && !projects.isEmpty()) {
-                statusArea.setText("状态：项目列表已缓存：" + projects.size() + " 个");
+                setStatus("项目列表已缓存：" + projects.size() + " 个");
                 if (afterLoaded != null) afterLoaded.run();
                 return;
             }
@@ -311,7 +374,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 projects.addAll(items);
                 populateProjectBox();
                 savePreferences();
-                statusArea.setText(items.isEmpty() ? "状态：项目列表为空，请检查禅道权限或项目入口。" : "状态：项目列表已加载：" + items.size() + " 个");
+                setStatus(items.isEmpty() ? "项目列表为空，请检查禅道权限或项目入口。" : "项目列表已加载：" + items.size() + " 个");
                 if (afterLoaded != null) afterLoaded.run();
             });
         }
@@ -322,7 +385,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void loadMembers(boolean force, Runnable afterLoaded) {
             if (!force && !members.isEmpty()) {
-                statusArea.setText("状态：成员列表已缓存：" + members.size() + " 个");
+                setStatus("成员列表已缓存：" + members.size() + " 个");
+                populateMemberBox();
+                renderBugs();
                 if (afterLoaded != null) afterLoaded.run();
                 return;
             }
@@ -332,14 +397,18 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 populateMemberBox();
                 savePreferences();
                 renderBugs();
-                statusArea.setText(items.isEmpty() ? "状态：成员列表为空，请先选择项目或检查禅道权限。" : "状态：成员列表已加载：" + items.size() + " 个");
+                setStatus(items.isEmpty() ? "成员列表为空，请先选择项目或检查禅道权限。" : "成员列表已加载：" + items.size() + " 个");
                 if (afterLoaded != null) afterLoaded.run();
             });
         }
 
         private void refreshBugs() {
             if (!client.loggedIn()) return;
-            runAsync("正在获取 Bug 列表...", () -> client.listBugs(selectedProjectId(), "all", "", accountField.getText()), result -> {
+            runAsync("正在获取 Bug 列表...", () -> {
+                client.clearPromptImages();
+                List<BugSummary> result = client.listBugs(selectedProjectId(), "all", "", accountField.getText());
+                return client.enrichVideoFlags(result);
+            }, result -> {
                 bugs.clear();
                 bugs.addAll(result);
                 currentPage = 1;
@@ -348,17 +417,45 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             });
         }
 
+        private void copyBugAccessDiagnostic() {
+            if (!client.loggedIn()) return;
+            runAsync("正在收集诊断信息...", () -> client.collectBugAccessDiagnostic(selectedProjectId(), snapshotDebugEvents()), text -> {
+                CopyPasteManager.getInstance().setContents(new StringSelection(text));
+                setStatus("Bug 列表诊断信息已复制到剪贴板。");
+                Messages.showInfoMessage(project, "Bug 列表诊断信息已复制到剪贴板，请粘贴给我继续分析。", "禅道助手");
+            });
+        }
+
+        private void clearImageCache() {
+            client.clearPromptImages();
+            setStatus("本地图片缓存已清理。");
+        }
+
+        private List<String> snapshotDebugEvents() {
+            synchronized (debugEvents) {
+                return new ArrayList<>(debugEvents);
+            }
+        }
+
         private String selectedProjectId() {
             Object item = projectBox.getSelectedItem();
             return item instanceof Item ? ((Item)item).id : "";
         }
 
         private String selectedMemberAccount() {
+            Object editorItem = memberBox.isEditable() && memberBox.getEditor() != null ? memberBox.getEditor().getItem() : null;
+            if (editorItem instanceof Item) {
+                return ((Item)editorItem).id;
+            }
+            String editorText = editorItem == null ? "" : editorItem.toString().trim();
+            if (editorText.isBlank() || editorText.equals("全部成员")) return "";
+            if (!editorText.isBlank()) return editorText.contains("|") ? editorText.substring(editorText.lastIndexOf('|') + 1).trim() : editorText;
             Object item = memberBox.getSelectedItem();
             if (item instanceof Item) {
                 return ((Item)item).id;
             }
             String text = item == null ? "" : item.toString().trim();
+            if (text.isBlank() || text.equals("全部成员")) return "";
             return text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
         }
 
@@ -382,8 +479,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             properties.setValue("zentao.idea.serverUrl", serverField.getText(), DEFAULT_SERVER);
             properties.setValue("zentao.idea.account", accountField.getText(), "");
             properties.setValue("zentao.idea.autoLogin", autoLoginBox.isSelected(), true);
-            properties.setValue("zentao.idea.rememberPassword", rememberPasswordBox.isSelected(), false);
-            properties.setValue("zentao.idea.password", rememberPasswordBox.isSelected() ? new String(passwordField.getPassword()) : "", "");
+            properties.setValue("zentao.idea.aiEngine", "claudeCode", "claudeCode");
+            properties.setValue("zentao.idea.password", new String(passwordField.getPassword()), "");
+            properties.setValue("zentao.idea.sessionCookies", client.cookieHeader(), "");
             properties.setValue("zentao.idea.projectId", selectedProjectId(), "");
             properties.setValue("zentao.idea.memberAccount", selectedMemberAccount(), "");
             properties.setValue("zentao.idea.projects", encodeItems(projects), "");
@@ -395,9 +493,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             PropertiesComponent properties = PropertiesComponent.getInstance(project);
             serverField.setText(properties.getValue("zentao.idea.serverUrl", DEFAULT_SERVER));
             accountField.setText(properties.getValue("zentao.idea.account", ""));
-            rememberPasswordBox.setSelected(properties.getBoolean("zentao.idea.rememberPassword", false));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
+            aiEngineBox.setSelectedIndex(0);
             passwordField.setText(properties.getValue("zentao.idea.password", ""));
+            client.restoreSession(serverField.getText(), properties.getValue("zentao.idea.sessionCookies", ""));
             preferredProjectId = properties.getValue("zentao.idea.projectId", "");
             preferredMemberAccount = "";
             projects.clear();
@@ -414,18 +513,26 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private void populateProjectBox() {
             hydratingProjects = true;
             projectBox.removeAllItems();
-            projectBox.addItem(new Item("", "全部项目"));
             for (Item item : projects) projectBox.addItem(item);
-            selectItem(projectBox, preferredProjectId);
+            if (projectBox.getItemCount() > 0) {
+                if (preferredProjectId == null || preferredProjectId.isBlank()) {
+                    projectBox.setSelectedIndex(0);
+                } else {
+                    selectItem(projectBox, preferredProjectId);
+                }
+            }
             hydratingProjects = false;
         }
 
         private void populateMemberBox() {
             hydratingMembers = true;
             memberBox.removeAllItems();
-            memberBox.addItem(new Item("", "全部成员"));
             for (Item item : members) memberBox.addItem(item);
-            selectItem(memberBox, preferredMemberAccount);
+            if (preferredMemberAccount == null || preferredMemberAccount.isBlank()) {
+                memberBox.getEditor().setItem("");
+            } else {
+                selectItem(memberBox, preferredMemberAccount);
+            }
             hydratingMembers = false;
         }
 
@@ -465,14 +572,22 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void renderBugs() {
             updateMineFilterAvailability();
-            List<BugSummary> filtered = filteredBugs();
+            List<BugSummary> memberFiltered = filterBugsBySelectedMember();
+            List<BugSummary> filtered = filterBugsByCategory(memberFiltered);
             int totalPages = Math.max(1, (int)Math.ceil(filtered.size() / (double)PAGE_SIZE));
             currentPage = Math.min(Math.max(1, currentPage), totalPages);
             int start = Math.min(filtered.size(), (currentPage - 1) * PAGE_SIZE);
             int end = Math.min(filtered.size(), start + PAGE_SIZE);
             bugListPanel.removeAll();
-            for (BugSummary bug : filtered.subList(start, end)) bugListPanel.add(new BugCard(bug));
+            if (bugs.isEmpty()) {
+                bugListPanel.add(emptyState("暂无 Bug，请先登录或刷新。"));
+            } else if (filtered.isEmpty()) {
+                bugListPanel.add(emptyState("当前成员或分类暂无 Bug。原始 " + bugs.size() + " 个，成员过滤后 " + memberFiltered.size() + " 个。"));
+            } else {
+                for (BugSummary bug : filtered.subList(start, end)) bugListPanel.add(new BugCard(bug));
+            }
             bugCountLabel.setText("共 " + filtered.size() + " 个 Bug / 总 " + bugs.size() + " 个");
+            setStatus("Bug 原始 " + bugs.size() + " 个，成员过滤 " + memberFiltered.size() + " 个，当前显示 " + filtered.size() + " 个。");
             pageLabel.setText(currentPage + "/" + totalPages);
             aiFixAllButton.setText("AI一键修复 " + unresolved(filtered).size());
             aiFixAllButton.setEnabled(!unresolved(filtered).isEmpty());
@@ -481,7 +596,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private List<BugSummary> filteredBugs() {
-            List<BugSummary> scopedBugs = filterBugsBySelectedMember();
+            return filterBugsByCategory(filterBugsBySelectedMember());
+        }
+
+        private List<BugSummary> filterBugsByCategory(List<BugSummary> scopedBugs) {
+            if (allFilterBox.isSelected()) return scopedBugs;
             Set<String> active = new LinkedHashSet<>();
             filterChecks.forEach((key, box) -> {
                 if (box.isSelected()) active.add(key);
@@ -497,6 +616,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 }
             }
             return result;
+        }
+
+        private JComponent emptyState(String text) {
+            JLabel label = new JLabel(text);
+            label.setBorder(JBUI.Borders.empty(16));
+            label.setForeground(JBColor.GRAY);
+            return label;
         }
 
         private List<BugSummary> filterBugsBySelectedMember() {
@@ -568,6 +694,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             List<BugSummary> targets = unresolved(filteredBugs());
             if (targets.isEmpty()) return;
             runAsync("正在构建 " + targets.size() + " 个 Bug 的批量修复提示词...", () -> {
+                client.cleanupOldPromptImages(Duration.ofDays(1));
                 List<BugDetail> details = new ArrayList<>();
                 for (BugSummary bug : targets) {
                     details.add(client.getBugDetail(bug.id));
@@ -576,22 +703,39 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }, details -> {
                 String prompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
                 sendToClaudeCode(prompt);
-                statusArea.setText("状态：" + details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
+                setStatus(details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
             });
         }
 
         private void aiFix(String bugId) {
-            runAsync("正在构建 Bug #" + bugId + " 修复提示词...", () -> client.getBugDetail(bugId), detail -> {
+            runAsync("正在构建 Bug #" + bugId + " 修复提示词...", () -> {
+                client.cleanupOldPromptImages(Duration.ofDays(1));
+                return client.getBugDetail(bugId);
+            }, detail -> {
                 sendToClaudeCode(PromptBuilder.build(detail));
-                statusArea.setText("状态：Bug #" + bugId + " 已发送给 Claude Code with GUI");
+                setStatus("Bug #" + bugId + " 已发送给 Claude Code with GUI");
             });
         }
 
         private void preview(String bugId) {
-            runAsync("正在加载 Bug #" + bugId + " 预览...", () -> client.getBugDetail(bugId), detail -> {
-                if (previewDialog == null) previewDialog = new PreviewDialog();
-                previewDialog.show(detail);
-            });
+            runAsync("正在加载 Bug #" + bugId + " 预览...", () -> client.getBugDetail(bugId), this::openPreviewEditorTab);
+        }
+
+        private void openPreviewEditorTab(BugDetail detail) {
+            String previewTitle = detail.description == null || detail.description.isBlank() ? detail.title : detail.description;
+            String contentHtml = previewHtml(detail, previewTitle);
+            if (previewFile == null) {
+                previewFile = new ZenTaoPreviewVirtualFile();
+            }
+            previewFile.update(detail.id, contentHtml);
+            FileEditorManager editorManager = FileEditorManager.getInstance(project);
+            FileEditor[] editors = editorManager.openFile(previewFile, true);
+            for (FileEditor editor : editors) {
+                if (editor instanceof ZenTaoPreviewFileEditor previewEditor) {
+                    previewEditor.updateHtml(contentHtml);
+                }
+            }
+            setStatus("Bug #" + detail.id + " 预览已在编辑区标签页打开");
         }
 
         private void submitWorkflow(String bugId, String action) {
@@ -599,29 +743,52 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 case "assign" -> "指派";
                 case "confirm" -> "确认";
                 case "resolve" -> "解决";
+                case "close" -> "关闭";
                 case "activate" -> "激活";
                 default -> action;
             };
             String assignee = "";
+            String solution = "fixed";
             if (action.equals("assign")) {
                 assignee = Messages.showInputDialog(project, "请输入要指派给的禅道账号：", "禅道助手 - 指派", null);
                 if (assignee == null || assignee.isBlank()) return;
+            } else if (action.equals("resolve")) {
+                Object selected = javax.swing.JOptionPane.showInputDialog(
+                        root,
+                        "选择解决方案：",
+                        "禅道助手 - 解决方案",
+                        javax.swing.JOptionPane.QUESTION_MESSAGE,
+                        null,
+                        new String[] {"已解决", "重复 Bug", "无法重现", "延期处理", "不予解决", "设计如此", "外部原因"},
+                        "已解决"
+                );
+                if (selected == null) return;
+                solution = switch (selected.toString()) {
+                    case "重复 Bug" -> "duplicate";
+                    case "无法重现" -> "notReproducible";
+                    case "延期处理" -> "postponed";
+                    case "不予解决" -> "willNotFix";
+                    case "设计如此" -> "byDesign";
+                    case "外部原因" -> "external";
+                    default -> "fixed";
+                };
             }
             String defaultComment = action.equals("resolve") ? "已修复，请验证。" : action.equals("activate") ? "重新激活，请继续处理。" : "";
             String comment = Messages.showInputDialog(project, title + " Bug #" + bugId + "，可填写备注：", "禅道助手 - " + title, null, defaultComment, null);
             if (comment == null) return;
             String finalAssignee = assignee;
+            String finalSolution = solution;
             runAsync("正在" + title + " Bug #" + bugId + "...", () -> {
-                client.submitWorkflow(bugId, action, finalAssignee, comment);
+                client.submitWorkflow(bugId, action, finalAssignee, finalSolution, comment);
                 return true;
             }, ignored -> {
-                statusArea.setText("状态：Bug #" + bugId + " 已提交" + title);
+                setStatus("Bug #" + bugId + " 已提交" + title);
                 refreshBugs();
             });
         }
 
         private void sendToClaudeCode(String prompt) {
-            CopyPasteManager.getInstance().setContents(new StringSelection(prompt));
+            putPromptOnClipboard(prompt);
             ActionManager manager = ActionManager.getInstance();
             for (String actionId : CLAUDE_ACTION_IDS) {
                 AnAction action = manager.getAction(actionId);
@@ -635,18 +802,62 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                             null
                     );
                     action.actionPerformed(event);
+                    pastePromptIntoClaudeChat(prompt);
                     return;
                 }
             }
             Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，请粘贴到 Claude Code with GUI。", "禅道助手");
         }
 
+        private void pastePromptIntoClaudeChat(String prompt) {
+            javax.swing.Timer timer = new javax.swing.Timer(1200, event -> {
+                ((javax.swing.Timer)event.getSource()).stop();
+                putPromptOnClipboard(prompt);
+                nativePastePrompt();
+            });
+            timer.setRepeats(false);
+            timer.start();
+        }
+
+        private void putPromptOnClipboard(String prompt) {
+            StringSelection selection = new StringSelection(prompt == null ? "" : prompt);
+            CopyPasteManager.getInstance().setContents(selection);
+            try {
+                java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+            } catch (Exception ignored) {
+                // IDEA's own clipboard is enough for manual paste fallback.
+            }
+        }
+
+        private void nativePastePrompt() {
+            try {
+                java.awt.Robot robot = new java.awt.Robot();
+                robot.setAutoDelay(40);
+                int mask = java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
+                int modifierKey = (mask & java.awt.event.InputEvent.META_DOWN_MASK) != 0 ? java.awt.event.KeyEvent.VK_META : java.awt.event.KeyEvent.VK_CONTROL;
+                robot.keyPress(modifierKey);
+                robot.keyPress(java.awt.event.KeyEvent.VK_V);
+                robot.keyRelease(java.awt.event.KeyEvent.VK_V);
+                robot.keyRelease(modifierKey);
+            } catch (Exception error) {
+                Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，但自动粘贴失败：" + error.getMessage(), "禅道助手");
+            }
+        }
+
         private <T> void runAsync(String status, ThrowingSupplier<T> supplier, java.util.function.Consumer<T> onSuccess) {
-            statusArea.setText("状态：" + status);
+            setLoading(true, status);
             new SwingWorker<T, Void>() {
                 @Override
                 protected T doInBackground() throws Exception {
-                    return supplier.get();
+                    try {
+                        return supplier.get();
+                    } catch (Exception error) {
+                        if (!status.contains("登录") && isSessionExpiredError(error) && canRetryLogin()) {
+                            client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                            return supplier.get();
+                        }
+                        throw error;
+                    }
                 }
 
                 @Override
@@ -654,11 +865,84 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     try {
                         onSuccess.accept(get());
                     } catch (Exception error) {
-                        statusArea.setText("失败：" + error.getMessage());
-                        Messages.showErrorDialog(project, error.getMessage(), "禅道助手");
+                        Throwable cause = rootCause(error);
+                        String message = readableError(cause);
+                        setStatus("失败：" + message);
+                        Messages.showErrorDialog(project, message, "禅道助手");
+                    } finally {
+                        try {
+                            setLoading(false, null);
+                        } catch (Exception error) {
+                            setStatus("失败：" + readableError(rootCause(error)));
+                        }
                     }
                 }
             }.execute();
+        }
+
+        private void setLoading(boolean value, String status) {
+            loading = value;
+            if (status != null) setStatus(status);
+            refreshButton.setEnabled(!value);
+            clearImageCacheButton.setEnabled(!value);
+            boolean hasAiTargets = false;
+            try {
+                hasAiTargets = !unresolved(filteredBugs()).isEmpty();
+            } catch (Exception ignored) {
+                // UI state recalculation should never hide the original async result.
+            }
+            aiFixAllButton.setEnabled(!value && hasAiTargets);
+            loginButton.setEnabled(!value);
+            projectBox.setEnabled(!value);
+            memberBox.setEnabled(!value);
+        }
+
+        private void setStatus(String status) {
+            String text = status == null ? "未知错误" : status;
+            String normalized = text.startsWith("状态：") || text.startsWith("失败：") ? text : "状态：" + text;
+            statusArea.setText(normalized);
+            debugLog("status", normalized);
+        }
+
+        private static Throwable rootCause(Throwable error) {
+            Throwable current = error;
+            while (current instanceof java.util.concurrent.ExecutionException && current.getCause() != null) {
+                current = current.getCause();
+            }
+            return current == null ? new IllegalStateException("未知错误") : current;
+        }
+
+        private static String readableError(Throwable error) {
+            String message = error.getMessage();
+            if (message == null || message.isBlank()) {
+                return error.getClass().getName();
+            }
+            return error.getClass().getName() + ": " + message;
+        }
+
+        private void debugLog(String event, String message) {
+            synchronized (debugEvents) {
+                debugEvents.add("{\"time\":" + System.currentTimeMillis() + ",\"event\":\"" + event + "\",\"message\":\"" + escapeForLog(message) + "\"}");
+                if (debugEvents.size() > 200) debugEvents.remove(0);
+            }
+        }
+
+        private static String escapeForLog(String value) {
+            return (value == null ? "" : value).replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+        }
+
+        private boolean canRetryLogin() {
+            return !accountField.getText().isBlank() && passwordField.getPassword().length > 0;
+        }
+
+        private static boolean isSessionExpiredError(Throwable error) {
+            Throwable current = error;
+            while (current != null) {
+                String message = current.getMessage();
+                if (message != null && (message.contains("登录已超时") || message.contains("重新登录"))) return true;
+                current = current.getCause();
+            }
+            return false;
         }
 
         private final class BugCard extends JPanel {
@@ -667,6 +951,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 setBorder(new LineBorder(statusColor(bug.status), 1, true));
                 setBackground(statusBackground(bug.status));
                 setOpaque(true);
+                setAlignmentX(LEFT_ALIGNMENT);
+                setMaximumSize(new Dimension(Integer.MAX_VALUE, getPreferredSize().height + 96));
                 JPanel title = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
                 title.setOpaque(false);
                 title.add(new JLabel("#" + bug.id));
@@ -675,6 +961,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 title.add(status);
                 title.add(new JLabel("指派给：" + assigneeText(bug.assignedTo)));
                 if (!bug.priority.equals("unknown")) title.add(new JLabel(priorityText(bug.priority)));
+                if (bug.hasVideo) title.add(new JLabel("🎬 视频"));
                 add(title, BorderLayout.NORTH);
                 add(new JLabel("<html>" + html(bug.title) + "</html>"), BorderLayout.CENTER);
                 JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
@@ -692,9 +979,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     JButton resolve = new JButton("解决");
                     resolve.addActionListener(event -> submitWorkflow(bug.id, "resolve"));
                     buttons.add(resolve);
+                    JButton close = new JButton("关闭");
+                    close.addActionListener(event -> submitWorkflow(bug.id, "close"));
+                    buttons.add(close);
                     JButton aiFix = new JButton("AI修复");
                     aiFix.addActionListener(event -> aiFix(bug.id));
                     buttons.add(aiFix);
+                } else if (bug.status.equals("resolved")) {
+                    JButton activate = new JButton("激活");
+                    activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
+                    buttons.add(activate);
+                    JButton close = new JButton("关闭");
+                    close.addActionListener(event -> submitWorkflow(bug.id, "close"));
+                    buttons.add(close);
                 } else {
                     JButton activate = new JButton("激活");
                     activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
@@ -710,32 +1007,38 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
-        private final class PreviewDialog {
-            private final JEditorPane pane = new JEditorPane("text/html", "");
-            private final DialogWrapper dialog = new DialogWrapper(project) {
-                {
-                    init();
-                    setTitle("Bug 预览");
-                }
-
-                @Override
-                protected JComponent createCenterPanel() {
-                    pane.setEditable(false);
-                    return new JScrollPane(pane);
-                }
-            };
-
-            private void show(BugDetail detail) {
-                String previewTitle = detail.description == null || detail.description.isBlank() ? detail.title : detail.description;
-                pane.setText("<html><body style='font-family:sans-serif'><h2>#" + html(detail.id) + " " + html(previewTitle) + "</h2>" + section("重现步骤", detail.reproduceStepsHtml, detail.reproduceSteps) + section("期望", detail.expectedResultHtml, detail.expectedResult) + "</body></html>");
-                dialog.setTitle("Bug #" + detail.id);
-                dialog.show();
-            }
+        private static String previewHtml(BugDetail detail, String previewTitle) {
+            return "<html><head><meta charset='UTF-8'><style>"
+                    + ":root{color-scheme:dark;}"
+                    + "body{margin:0;background:#1e1f22;color:#dfe1e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;line-height:1.65;padding:22px;}"
+                    + ".page{max-width:1080px;margin:0 auto;}"
+                    + ".hero,.section{background:#2b2d30;border:1px solid #45484d;border-radius:10px;margin:12px 0;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.25);}"
+                    + ".bug-id{color:#6aa9ff;font-weight:700;font-size:13px;}"
+                    + "h1{font-size:20px;line-height:1.45;margin:6px 0 0;color:#f0f2f5;}"
+                    + ".section-title{font-weight:700;margin-bottom:8px;color:#f0f2f5;}"
+                    + ".section-body{color:#dfe1e5;}"
+                    + ".section-body *{max-width:100%;color:inherit!important;background:transparent!important;}"
+                    + "img{max-width:100%;height:auto;border:1px solid #555b63;border-radius:8px;display:block;margin:8px 0;}"
+                    + "a{color:#6aa9ff;}"
+                    + ".video-list{display:grid;gap:10px;}.video-link{align-items:center;border:1px solid #555b63;border-radius:8px;color:#6aa9ff!important;display:inline-flex;font-weight:700;gap:8px;padding:10px 12px;text-decoration:none;width:fit-content;}.video-link:before{content:'▶';border:1px solid currentColor;border-radius:999px;display:inline-grid;height:26px;place-items:center;width:26px;}"
+                    + "pre,code{background:#1b1c1f!important;color:#dfe1e5!important;border-radius:6px;padding:2px 4px;}"
+                    + "</style></head><body><main class='page'><section class='hero'><div class='bug-id'>#" + html(detail.id) + "</div><h1>" + html(previewTitle) + "</h1></section>" + previewSection("描述", detail.descriptionHtml, detail.description) + previewSection("重现步骤", detail.reproduceStepsHtml, detail.reproduceSteps) + previewSection("期望", detail.expectedResultHtml, detail.expectedResult) + previewSection("实际结果", "", detail.actualResult) + videoSection(detail.attachments) + "</main></body></html>";
         }
 
-        private static String section(String title, String htmlValue, String textValue) {
+        private static String previewSection(String title, String htmlValue, String textValue) {
             String body = htmlValue == null || htmlValue.isBlank() ? html(textValue == null || textValue.isBlank() ? "未提供" : textValue) : htmlValue;
-            return "<h3>" + html(title) + "</h3><div>" + body + "</div>";
+            return "<section class='section'><div class='section-title'>" + html(title) + "</div><div class='section-body'>" + body + "</div></section>";
+        }
+
+        private static String videoSection(List<Attachment> attachments) {
+            List<Attachment> videos = attachments == null ? List.of() : attachments.stream().filter(item -> "video".equals(item.kind)).toList();
+            if (videos.isEmpty()) return "";
+            List<String> links = new ArrayList<>();
+            for (int i = 0; i < videos.size(); i++) {
+                Attachment video = videos.get(i);
+                links.add("<a class='video-link' href='" + html(video.url) + "'>播放视频 " + (i + 1) + (video.name == null || video.name.isBlank() ? "" : "：" + html(video.name)) + "</a>");
+            }
+            return "<section class='section'><div class='section-title'>视频附件</div><div class='section-body video-list'>" + String.join("", links) + "</div></section>";
         }
 
         private static boolean containsIgnoreCase(String value, String needle) {
@@ -802,30 +1105,30 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
-        private record BugSummary(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy) {}
-        private record Attachment(String name, String url) {}
-        private record BugDetail(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, String description, String descriptionHtml, String reproduceSteps, String reproduceStepsHtml, String expectedResult, String expectedResultHtml, String actualResult, List<Attachment> attachments) {}
+        private record BugSummary(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, boolean hasVideo) {}
+        private record Attachment(String name, String url, String kind) {}
+        private record BugDetail(String id, String title, String priority, String status, String createdAt, String assignedTo, String openedBy, String description, String descriptionHtml, String reproduceSteps, String reproduceStepsHtml, String expectedResult, String expectedResultHtml, String actualResult, List<Attachment> attachments, List<String> promptImages) {}
 
         private static final class PromptBuilder {
             private static String build(BugDetail bug) {
-                List<String> images = extractReproduceStepImages(bug.reproduceStepsHtml).stream().limit(32).toList();
+                List<String> images = bug.promptImages.stream().limit(32).toList();
                 String imageText = images.isEmpty() ? "未提供" : indexedImages(images, "");
                 String description = textOrFallback(bug.description, bug.title);
                 String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
-                return "【Bug修复任务】\nBug编号：" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText + "\n\n请在当前代码仓库中修复以上 Bug。完成后请说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+                return "【Bug修复任务】\nBug编号：" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，Claude Code 可直接读取上述本地路径，不需要访问禅道链接。\n\n请在当前代码仓库中修复以上 Bug。完成后请说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
             }
 
             private static String buildBatch(List<BugDetail> bugs) {
                 List<String> sections = new ArrayList<>();
                 for (int i = 0; i < bugs.size(); i++) {
                     BugDetail bug = bugs.get(i);
-                    List<String> images = extractReproduceStepImages(bug.reproduceStepsHtml).stream().limit(32).toList();
+                    List<String> images = bug.promptImages.stream().limit(32).toList();
                     String imageText = images.isEmpty() ? "  未提供" : indexedImages(images, "  ");
                     String description = textOrFallback(bug.description, bug.title);
                     String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
                     sections.add("## " + (i + 1) + ". Bug #" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText);
                 }
-                return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n" + String.join("\n\n---\n\n", sections) + "\n\n完成后请按 Bug 编号分别说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+                return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n" + String.join("\n\n---\n\n", sections) + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，Claude Code 可直接读取上述本地路径，不需要访问禅道链接。\n\n完成后请按 Bug 编号分别说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
             }
 
             private static String indexedImages(List<String> images, String prefix) {
@@ -886,9 +1189,74 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
             private String baseUrl = DEFAULT_SERVER;
+            private String promptImageRoot = System.getProperty("user.dir");
+
+            private void setPromptImageRoot(String value) {
+                if (value != null && !value.isBlank()) promptImageRoot = value;
+            }
+
+            private void cleanupOldPromptImages(Duration maxAge) {
+                if (maxAge == null) return;
+                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                if (!Files.isDirectory(imageDir)) return;
+                long expireBefore = System.currentTimeMillis() - maxAge.toMillis();
+                try (java.util.stream.Stream<Path> paths = Files.list(imageDir)) {
+                    paths.filter(Files::isRegularFile).forEach(path -> {
+                        try {
+                            if (Files.getLastModifiedTime(path).toMillis() < expireBefore) {
+                                Files.deleteIfExists(path);
+                            }
+                        } catch (Exception ignored) {
+                            // Old image cleanup should not block AI prompt generation.
+                        }
+                    });
+                } catch (Exception ignored) {
+                    // Ignore cleanup failures; the next AI run can try again.
+                }
+            }
+
+            private void clearPromptImages() {
+                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                if (!Files.isDirectory(imageDir)) return;
+                try (java.util.stream.Stream<Path> paths = Files.list(imageDir)) {
+                    paths.filter(Files::isRegularFile).forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Cache cleanup should not block refreshing bugs.
+                        }
+                    });
+                } catch (Exception ignored) {
+                    // Ignore cleanup failures; refresh should still continue.
+                }
+            }
 
             private boolean loggedIn() {
                 return !cookieJar.isEmpty();
+            }
+
+            private void restoreSession(String serverUrl, String cookies) {
+                baseUrl = normalizeBaseUrl(serverUrl);
+                cookieJar.clear();
+                for (String part : (cookies == null ? "" : cookies).split(";")) {
+                    String[] pair = part.trim().split("=", 2);
+                    if (pair.length == 2 && !pair[0].isBlank() && !pair[1].isBlank()) {
+                        cookieJar.put(pair[0], pair[1]);
+                    }
+                }
+            }
+
+            private String cookieHeader() {
+                return cookieJar.entrySet().stream().map(entry -> entry.getKey() + "=" + entry.getValue()).reduce((a, b) -> a + "; " + b).orElse("");
+            }
+
+            private boolean isSessionValid() {
+                try {
+                    get("index.php", Map.of("m", "bug", "f", "browse"), true);
+                    return true;
+                } catch (Exception ignored) {
+                    return false;
+                }
             }
 
             private void login(String serverUrl, String account, String password) throws Exception {
@@ -974,6 +1342,56 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return List.of();
             }
 
+            private List<BugSummary> enrichVideoFlags(List<BugSummary> bugs) {
+                List<BugSummary> result = new ArrayList<>();
+                for (BugSummary bug : bugs) {
+                    if (bug.hasVideo) {
+                        result.add(bug);
+                        continue;
+                    }
+                    boolean hasVideo = false;
+                    try {
+                        String html = get("index.php", Map.of("m", "bug", "f", "view", "bugID", bug.id), false);
+                        hasVideo = parseAttachments(html).stream().anyMatch(item -> "video".equals(item.kind));
+                    } catch (Exception ignored) {
+                        // Keep list rendering fast and resilient if one detail page is not accessible.
+                    }
+                    result.add(new BugSummary(bug.id, bug.title, bug.priority, bug.status, bug.createdAt, bug.assignedTo, bug.openedBy, hasVideo));
+                }
+                return result;
+            }
+
+            private String collectBugAccessDiagnostic(String projectId, List<String> uiDebugEvents) throws Exception {
+                StringBuilder builder = new StringBuilder();
+                builder.append("{\n");
+                builder.append("  \"projectId\": \"").append(escapeJson(projectId == null ? "" : projectId)).append("\",\n");
+                builder.append("  \"baseUrl\": \"").append(escapeJson(baseUrl)).append("\",\n");
+                builder.append("  \"hasCookie\": ").append(!cookieJar.isEmpty()).append(",\n");
+                builder.append("  \"cookieNames\": \"").append(escapeJson(String.join(",", cookieJar.keySet()))).append("\",\n");
+                builder.append("  \"attempts\": [\n");
+                List<Map<String, String>> params = bugParams(projectId, "");
+                for (int i = 0; i < params.size(); i++) {
+                    Map<String, String> param = params.get(i);
+                    try {
+                        String html = get("index.php", param, false);
+                        List<BugSummary> parsed = parseBugs(html, "");
+                        String text = htmlText(html);
+                        builder.append("    {\"params\":\"").append(escapeJson(param.toString())).append("\",\"length\":").append(html.length()).append(",\"parsedBugCount\":").append(parsed.size()).append(",\"preview\":\"").append(escapeJson(text.substring(0, Math.min(300, text.length())))).append("\"}");
+                    } catch (Exception error) {
+                        builder.append("    {\"params\":\"").append(escapeJson(param.toString())).append("\",\"error\":\"").append(escapeJson(error.getMessage())).append("\"}");
+                    }
+                    builder.append(i == params.size() - 1 ? "\n" : ",\n");
+                }
+                builder.append("  ],\n");
+                builder.append("  \"uiDebugLog\": [\n");
+                for (int i = 0; i < uiDebugEvents.size(); i++) {
+                    builder.append("    ").append(uiDebugEvents.get(i));
+                    builder.append(i == uiDebugEvents.size() - 1 ? "\n" : ",\n");
+                }
+                builder.append("  ]\n}");
+                return builder.toString();
+            }
+
             private BugDetail getBugDetail(String id) throws Exception {
                 String html = get("index.php", Map.of("m", "bug", "f", "view", "bugID", id), false);
                 String detailContentHtml = readBugDescriptionHtml(html);
@@ -984,10 +1402,16 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 String description = htmlText(descriptionHtml);
                 String title = meaningfulTitle(html, id);
                 if (title.isBlank() && !description.isBlank()) title = description;
-                return new BugDetail(id, title.isBlank() ? "Bug #" + id : title, parsePriority(htmlText(html)), parseStatus(htmlText(html)), firstText(html, "\\d{4}-\\d{2}-\\d{2}"), "", "", description, descriptionHtml, htmlText(reproduceStepsHtml), reproduceStepsHtml, htmlText(expectedResultHtml), expectedResultHtml, htmlText(readSectionHtml(html, "实际结果|结果")), parseAttachments(html));
+                title = stripBugIdPrefix(title, id);
+                descriptionHtml = inlinePreviewImages(descriptionHtml);
+                reproduceStepsHtml = inlinePreviewImages(reproduceStepsHtml);
+                expectedResultHtml = inlinePreviewImages(expectedResultHtml);
+                List<Attachment> attachments = parseAttachments(html);
+                List<String> promptImages = preparePromptImages(id, descriptionHtml, reproduceStepsHtml, expectedResultHtml);
+                return new BugDetail(id, title.isBlank() ? "Bug #" + id : title, parsePriority(htmlText(html)), parseStatus(htmlText(html)), firstText(html, "\\d{4}-\\d{2}-\\d{2}"), "", "", description, descriptionHtml, htmlText(reproduceStepsHtml), reproduceStepsHtml, htmlText(expectedResultHtml), expectedResultHtml, htmlText(readSectionHtml(html, "实际结果|结果")), attachments, promptImages);
             }
 
-            private void submitWorkflow(String bugId, String action, String assignee, String comment) throws Exception {
+            private void submitWorkflow(String bugId, String action, String assignee, String solution, String comment) throws Exception {
                 String endpoint = switch (action) {
                     case "assign" -> "assignTo";
                     case "confirm" -> "confirmBug";
@@ -1004,11 +1428,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     form.put("assignedTo", assignee);
                     form.put("assignedTo[]", assignee);
                 } else if (action.equals("resolve")) {
-                    form.put("resolution", "fixed");
+                    form.put("resolution", solution == null || solution.isBlank() ? "fixed" : solution);
                     form.put("resolvedBuild", "trunk");
                     form.put("resolvedDate", formatZenTaoDate(new java.util.Date()));
                 } else if (action.equals("confirm")) {
                     form.put("confirmed", "1");
+                } else if (action.equals("close")) {
+                    form.putIfAbsent("closedDate", formatZenTaoDate(new java.util.Date()));
                 }
                 String body = post("index.php?m=bug&f=" + endpoint + "&bugID=" + enc(bugId), form);
                 if (body.contains("\"result\":\"fail\"") || body.contains("error")) {
@@ -1032,7 +1458,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     String linkText = htmlText(bugLink);
                     String title = cell(cells, titleIndex);
                     if (title.isBlank() || title.matches("#?\\d+")) title = !linkText.isBlank() && !linkText.equals(id) && !linkText.matches("#?\\d+") ? linkText : cells.stream().filter(cell -> isLikelyBugTitleCell(cell, id)).findFirst().orElse("Bug #" + id);
-                    result.add(new BugSummary(id, title, parsePriority(String.join(" ", cells)), parseStatus(String.join(" ", cells)), cell(cells, createdIndex), cell(cells, assignedIndex).isBlank() ? assignedTo : cell(cells, assignedIndex), cell(cells, openedIndex)));
+                    result.add(new BugSummary(id, title, parsePriority(String.join(" ", cells)), parseStatus(String.join(" ", cells)), cell(cells, createdIndex), cell(cells, assignedIndex).isBlank() ? assignedTo : cell(cells, assignedIndex), cell(cells, openedIndex), looksLikeVideo(String.join(" ", cells))));
                 }
                 Map<String, BugSummary> deduped = new LinkedHashMap<>();
                 for (BugSummary bug : result) deduped.putIfAbsent(bug.id, bug);
@@ -1371,6 +1797,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return value == null ? "" : value.replaceAll("\\s+", " ").trim();
             }
 
+            private static String escapeJson(String value) {
+                return (value == null ? "" : value)
+                        .replace("\\", "\\\\")
+                        .replace("\"", "\\\"")
+                        .replace("\r", "\\r")
+                        .replace("\n", "\\n");
+            }
+
             private static List<String> matches(String value, String regex) {
                 List<String> result = new ArrayList<>();
                 Matcher matcher = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(value == null ? "" : value);
@@ -1493,25 +1927,155 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                         .replaceAll("(?is)<style\\b[\\s\\S]*?</style>", "")
                         .replaceAll("(?i)\\son\\w+=[\"'][^\"']*[\"']", "")
                         .replaceAll("(?i)<img\\b((?:(?!src=)[^>])*?)\\sdata-src=[\"']([^\"']+)[\"']([^>]*?)>", "<img$1 src=\"$2\"$3>")
+                        .replaceAll("(?i)<img\\b((?:(?!src=)[^>])*?)\\sdata-original-src=[\"']([^\"']+)[\"']([^>]*?)>", "<img$1 src=\"$2\"$3>")
                         .replaceAll("(?i)\\s(src|href)=[\"']/(?!/)", " $1=\"" + baseUrl);
             }
 
+            private String inlinePreviewImages(String value) {
+                if (value == null || value.isBlank()) return value;
+                String result = value;
+                Matcher matcher = Pattern.compile("<img\\b[^>]*\\ssrc=[\"']([^\"']+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE).matcher(value);
+                while (matcher.find()) {
+                    String tag = matcher.group();
+                    String src = matcher.group(1);
+                    if (src == null || src.isBlank() || src.matches("(?i)^data:.*")) continue;
+                    try {
+                        String dataUrl = downloadPreviewImage(src.replace("&amp;", "&"));
+                        String nextTag = tag.replace(src, dataUrl);
+                        if (!nextTag.matches("(?is)<img\\b[^>]*\\bdata-original-src=.*")) {
+                            nextTag = nextTag.replaceFirst("(?i)<img\\b", "<img data-original-src=\"" + html(src) + "\"");
+                        }
+                        result = result.replace(tag, nextTag);
+                    } catch (Exception ignored) {
+                        // Keep the preview usable even if one image cannot be downloaded.
+                    }
+                }
+                return result;
+            }
+
+            private List<String> preparePromptImages(String bugId, String... htmlValues) {
+                Set<String> sources = new LinkedHashSet<>();
+                for (String htmlValue : htmlValues) {
+                    sources.addAll(PromptBuilder.extractReproduceStepImages(htmlValue));
+                }
+                List<String> result = new ArrayList<>();
+                for (String source : sources) {
+                    if (result.size() >= 32) break;
+                    try {
+                        String localPath = downloadPromptImage(bugId, source.replace("&amp;", "&"));
+                        if (!localPath.isBlank()) result.add(localPath);
+                    } catch (Exception ignored) {
+                        // Keep the AI prompt useful even if a single image cannot be materialized.
+                    }
+                }
+                return result;
+            }
+
+            private String downloadPromptImage(String bugId, String src) throws Exception {
+                URI uri = resolveResourceUri(src);
+                HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
+                        .timeout(Duration.ofSeconds(15))
+                        .GET()
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
+                        .header("Accept", "image/*");
+                addCookieHeader(builder);
+                HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
+                mergeSetCookie(response);
+                if (response.statusCode() < 200 || response.statusCode() >= 400) throw new IllegalStateException("图片请求失败：HTTP " + response.statusCode());
+                String contentType = response.headers().firstValue("content-type").orElse("image/png");
+                if (contentType.contains(";")) contentType = contentType.substring(0, contentType.indexOf(';')).trim();
+                if (!contentType.toLowerCase(Locale.ROOT).startsWith("image/")) throw new IllegalStateException("不是图片响应：" + contentType);
+                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                Files.createDirectories(imageDir);
+                String extension = imageExtension(contentType);
+                String digest = sha1(src).substring(0, 12);
+                Path file = imageDir.resolve("bug-" + safeFilePart(bugId) + "-" + digest + extension);
+                Files.write(file, response.body());
+                return file.toAbsolutePath().toString();
+            }
+
+            private String downloadPreviewImage(String src) throws Exception {
+                URI uri = resolveResourceUri(src);
+                HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
+                        .timeout(Duration.ofSeconds(15))
+                        .GET()
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
+                        .header("Accept", "image/*,*/*;q=0.8");
+                addCookieHeader(builder);
+                HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
+                mergeSetCookie(response);
+                if (response.statusCode() < 200 || response.statusCode() >= 400) throw new IllegalStateException("图片请求失败：HTTP " + response.statusCode());
+                String contentType = response.headers().firstValue("content-type").orElse("image/png");
+                if (contentType.contains(";")) contentType = contentType.substring(0, contentType.indexOf(';')).trim();
+                if (!contentType.toLowerCase(Locale.ROOT).startsWith("image/")) contentType = "image/png";
+                return "data:" + contentType + ";base64," + Base64.getEncoder().encodeToString(response.body());
+            }
+
+            private static String imageExtension(String contentType) {
+                String value = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+                if (value.contains("jpeg") || value.contains("jpg")) return ".jpg";
+                if (value.contains("gif")) return ".gif";
+                if (value.contains("webp")) return ".webp";
+                return ".png";
+            }
+
+            private static String safeFilePart(String value) {
+                return (value == null ? "" : value).replaceAll("[^a-zA-Z0-9._-]", "_");
+            }
+
+            private static String sha1(String value) throws Exception {
+                MessageDigest digest = MessageDigest.getInstance("SHA-1");
+                byte[] bytes = digest.digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+                StringBuilder builder = new StringBuilder();
+                for (byte item : bytes) builder.append(String.format("%02x", item));
+                return builder.toString();
+            }
+
+            private URI resolveResourceUri(String src) {
+                if (src.matches("(?i)^https?://.*")) return URI.create(src);
+                return URI.create(baseUrl).resolve(src);
+            }
+
             private static String meaningfulTitle(String html, String id) {
-                for (String item : matches(html, "<h1\\b[\\s\\S]*?</h1>|<[^>]*class=[\"'][^\"']*(?:detail-title|bug-title)[^\"']*[\"'][^>]*>[\\s\\S]*?</[^>]+>")) {
-                    String text = htmlText(item).replaceFirst("^#?\\d+\\s*", "");
+                for (String item : matches(html, "<div\\b[^>]*class=[\"'][^\"']*page-title[^\"']*[\"'][^>]*>[\\s\\S]*?</div>|<h1\\b[\\s\\S]*?</h1>|<[^>]*class=[\"'][^\"']*(?:detail-title|bug-title)[^\"']*[\"'][^>]*>[\\s\\S]*?</[^>]+>")) {
+                    String text = stripBugIdPrefix(htmlText(item), id);
                     if (!text.isBlank() && !text.equals(id) && !text.matches("#?\\d+") && text.length() > 4) return text;
                 }
                 return "";
+            }
+
+            private static String stripBugIdPrefix(String value, String id) {
+                return (value == null ? "" : value)
+                        .replaceFirst("(?i)^(?:BUG\\s*)?#?" + Pattern.quote(id) + "(?:\\s+|\\s*[-:：#]\\s*)", "")
+                        .replaceFirst("(?i)^(?:BUG\\s*)?#?" + Pattern.quote(id) + "$", "")
+                        .trim();
             }
 
             private record DetailSections(String descriptionHtml, String reproduceStepsHtml, String expectedResultHtml) {}
             private record Marker(int index, int end) {}
             private record MemberSource(String path, Map<String, String> params, boolean ajax) {}
 
-            private static List<Attachment> parseAttachments(String html) {
+            private List<Attachment> parseAttachments(String html) {
                 List<Attachment> result = new ArrayList<>();
-                for (String link : matches(html, "<a\\b[^>]*href=[\"'][^\"']*(?:file|download)[^\"']*[\"'][^>]*>[\\s\\S]*?</a>")) result.add(new Attachment(htmlText(link), attr(link, "href")));
+                for (String link : matches(html, "<a\\b[^>]*href=[\"'][^\"']*(?:file|download)[^\"']*[\"'][^>]*>[\\s\\S]*?</a>")) {
+                    String name = htmlText(link);
+                    String url = attr(link, "href");
+                    if (url != null && !url.isBlank()) url = resolveResourceUri(url.replace("&amp;", "&")).toString();
+                    result.add(new Attachment(name, url, attachmentKind(name, url)));
+                }
                 return result;
+            }
+
+            private static String attachmentKind(String name, String url) {
+                String value = ((name == null ? "" : name) + " " + (url == null ? "" : url)).toLowerCase(Locale.ROOT);
+                if (value.matches("(?s).*\\.(png|jpe?g|gif|webp|bmp|svg)(?:[?#\\s].*)?$")) return "image";
+                if (looksLikeVideo(value)) return "video";
+                return "file";
+            }
+
+            private static boolean looksLikeVideo(String value) {
+                String text = value == null ? "" : value.toLowerCase(Locale.ROOT);
+                return text.matches("(?s).*\\.(mp4|mov|m4v|webm|avi|mkv|flv|wmv)(?:[?#\\s].*)?$");
             }
 
             private static int indexOf(List<String> cells, String regex) {

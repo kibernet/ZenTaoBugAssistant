@@ -4,7 +4,7 @@ const emptyText = "未提供";
 const maxImageAttachments = 32;
 
 export function buildBugFixPrompt(bug: ZenTaoBugDetail): string {
-  const reproduceImages = extractReproduceStepImages(bug.reproduceStepsHtml).slice(0, maxImageAttachments);
+  const reproduceImages = (bug.promptImages?.length ? bug.promptImages : extractReproduceStepImages(bug.reproduceStepsHtml)).slice(0, maxImageAttachments);
   const reproduceImageText = reproduceImages.length
     ? reproduceImages.map((url, index) => `- 图片${index + 1}：${url}`).join("\n")
     : emptyText;
@@ -23,6 +23,8 @@ ${reproduceText}
 复现步骤图片：
 ${reproduceImageText}
 
+说明：图片已由插件使用当前禅道登录态下载为本地文件，AI 可直接读取上述本地路径；视频文件不传给 AI。
+
 请在当前代码仓库中修复以上 Bug。完成后请说明：
 1. 根因是什么
 2. 修改了哪些关键位置
@@ -31,7 +33,7 @@ ${reproduceImageText}
 
 export function buildBatchBugFixPrompt(bugs: ZenTaoBugDetail[]): string {
   const body = bugs.map((bug, index) => {
-    const reproduceImages = extractReproduceStepImages(bug.reproduceStepsHtml).slice(0, maxImageAttachments);
+    const reproduceImages = (bug.promptImages?.length ? bug.promptImages : extractReproduceStepImages(bug.reproduceStepsHtml)).slice(0, maxImageAttachments);
     const reproduceImageText = reproduceImages.length
       ? reproduceImages.map((url, imageIndex) => `  - 图片${imageIndex + 1}：${url}`).join("\n")
       : `  ${emptyText}`;
@@ -53,6 +55,8 @@ ${reproduceImageText}`;
 以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。
 
 ${body}
+
+说明：图片已由插件使用当前禅道登录态下载为本地文件，AI 可直接读取上述本地路径；视频文件不传给 AI。
 
 完成后请按 Bug 编号分别说明：
 1. 根因是什么

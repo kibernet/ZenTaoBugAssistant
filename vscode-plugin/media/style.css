@@ -94,6 +94,11 @@ button:disabled {
   position: relative;
 }
 
+#clearImageCache {
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
 #aiEngine {
   border-radius: 999px;
   max-width: 120px;

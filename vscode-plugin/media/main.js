@@ -16,6 +16,7 @@ document.getElementById("autoLogin").addEventListener("change", (event) => {
 });
 document.getElementById("refresh").addEventListener("click", () => post("refresh"));
 document.getElementById("fixSelected").addEventListener("click", () => postAiFixVisibleUnresolved());
+document.getElementById("clearImageCache").addEventListener("click", () => post("clearImageCache"));
 document.getElementById("aiEngine").addEventListener("change", (event) => {
   post("setAiEngine", { aiEngine: event.target.value });
 });
@@ -165,6 +166,9 @@ function renderBugMeta(bug) {
   parts.push(`<span class="assignee">指派给：${escapeHtml(formatAssignee(bug.assignedTo))}</span>`);
   if (bug.priority && bug.priority !== "unknown") {
     parts.push(`<span class="priority">${escapeHtml(priorityLabel(bug.priority))}</span>`);
+  }
+  if (bug.hasVideo) {
+    parts.push(`<span class="priority" title="该 Bug 包含视频附件">🎬 视频</span>`);
   }
   return parts.join("");
 }

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as fs from "fs/promises";
 import {
   buildBatchBugFixPrompt,
   buildBugFixPrompt,
@@ -63,6 +64,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.context.subscriptions.push(new vscode.Disposable(() => this.stopSessionKeepAlive()));
+    void this.cleanupImageCacheOncePerDay();
   }
 
   async activateAutoLogin(): Promise<void> {
@@ -98,6 +100,28 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     });
     // #endregion
     await this.refresh();
+  }
+
+  private imageCacheRoot(): string {
+    return vscode.Uri.joinPath(this.context.globalStorageUri, "bug-image-cache").fsPath;
+  }
+
+  private async clearImageCache(showMessage = true): Promise<void> {
+    await this.client?.clearImageCache(this.imageCacheRoot());
+    this.state.status = "本地图片缓存已清理";
+    this.postState();
+    if (showMessage) {
+      vscode.window.showInformationMessage("禅道助手本地图片缓存已清理。");
+    }
+  }
+
+  private async cleanupImageCacheOncePerDay(): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.context.globalState.get<string>("zentaoBugAssistant.lastImageCacheCleanup") === today) {
+      return;
+    }
+    await fs.rm(this.imageCacheRoot(), { recursive: true, force: true }).catch(() => undefined);
+    await this.context.globalState.update("zentaoBugAssistant.lastImageCacheCleanup", today);
   }
 
   async login(): Promise<void> {
@@ -166,7 +190,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
         assigneeScope: "all",
         teamMembers: []
       }));
-      this.state.bugs = bugs;
+      this.state.bugs = await this.withAutoLoginRetry(() => this.client!.enrichVideoFlags(bugs));
       // #region agent log
       debugLog("B2,B5", "vscode-plugin/src/zentaoViewProvider.ts:137", "refresh bug list completed", {
         bugCount: this.state.bugs.length,
@@ -321,7 +345,10 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
 
     await this.run(`正在构建 Bug #${id} 修复提示词...`, async () => {
-      const detail = await this.withAutoLoginRetry(() => this.client!.getBugDetail(id));
+      const detail = await this.withAutoLoginRetry(async () => {
+        const bugDetail = await this.client!.getBugDetail(id);
+        return this.client!.preparePromptImages(bugDetail, this.imageCacheRoot());
+      });
       const prompt = buildBugFixPrompt(detail);
       await sendPromptToAi(prompt, this.aiEngine);
       this.state.status = `Bug #${id} 已发送给 AI`;
@@ -340,7 +367,10 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     await this.run(`正在构建 ${ids.length} 个 Bug 的批量修复提示词...`, async () => {
       const details = [];
       for (const id of ids) {
-        details.push(await this.withAutoLoginRetry(() => this.client!.getBugDetail(id)));
+        details.push(await this.withAutoLoginRetry(async () => {
+          const detail = await this.client!.getBugDetail(id);
+          return this.client!.preparePromptImages(detail, this.imageCacheRoot());
+        }));
       }
       const prompt = details.length === 1 ? buildBugFixPrompt(details[0]) : buildBatchBugFixPrompt(details);
       await sendPromptToAi(prompt, this.aiEngine);
@@ -512,6 +542,31 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       margin: 8px 0;
       max-width: 100%;
     }
+    .video-list {
+      display: grid;
+      gap: 10px;
+    }
+    .video-link {
+      align-items: center;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      color: var(--vscode-textLink-foreground);
+      display: inline-flex;
+      font-weight: 700;
+      gap: 8px;
+      padding: 10px 12px;
+      text-decoration: none;
+      width: fit-content;
+    }
+    .video-link::before {
+      content: "▶";
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      display: inline-grid;
+      height: 26px;
+      place-items: center;
+      width: 26px;
+    }
     .section-body p {
       margin: 0 0 8px;
     }
@@ -535,6 +590,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     </section>
     ${previewSection("重现步骤", detail.reproduceStepsHtml, detail.reproduceSteps)}
     ${previewSection("期望", detail.expectedResultHtml, detail.expectedResult)}
+    ${videoSection(detail.videos)}
   </main>
 </body>
 </html>`;
@@ -557,6 +613,9 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
     if (message.type === "refresh") {
       await this.refresh();
+    }
+    if (message.type === "clearImageCache") {
+      await this.clearImageCache();
     }
     if (message.type === "select") {
       this.state.selectedIds = message.ids ?? [];
@@ -951,6 +1010,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       <button id="refresh">刷新</button>
       <div class="ai-fix-group">
         <button id="fixSelected" class="ai-fix-button">AI一键修复</button>
+        <button id="clearImageCache" title="清理本地缓存图片">清理缓存</button>
         <select id="aiEngine" title="选择修复使用的 AI">
           <option value="auto">自动选择</option>
           <option value="cursor">Cursor</option>
@@ -1070,6 +1130,18 @@ function previewSection(title: string, htmlValue: string | undefined, textValue:
   return `<section class="section">
     <div class="section-title">${escapeHtml(title)}</div>
     <div class="section-body ${htmlValue || textValue ? "" : "empty"}">${body}</div>
+  </section>`;
+}
+
+function videoSection(videos: ZenTaoBugDetail["videos"]): string {
+  if (!videos?.length) {
+    return "";
+  }
+  return `<section class="section">
+    <div class="section-title">视频附件</div>
+    <div class="section-body video-list">
+      ${videos.map((video, index) => `<a class="video-link" href="${escapeHtml(video.url || "")}">播放视频 ${index + 1}${video.name ? `：${escapeHtml(video.name)}` : ""}</a>`).join("")}
+    </div>
   </section>`;
 }
 

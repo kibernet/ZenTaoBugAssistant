@@ -10,6 +10,9 @@ import type {
   ZenTaoProject,
   ZenTaoSession
 } from "./types";
+import * as crypto from "crypto";
+import * as fs from "fs/promises";
+import * as path from "path";
 
 const defaultTimeoutMs = 10_000;
 const debugEndpoint = "http://127.0.0.1:7837/ingest/16d23de6-52c7-4de0-86a3-b3263b8c05ca";
@@ -326,6 +329,64 @@ export class ZenTaoClient {
     this.ensureSession();
     const html = await this.getText("index.php?m=bug&f=view", { bugID: bugId }, false);
     return this.inlinePreviewImages(await parseBugDetail(html, bugId, this.baseUrl));
+  }
+
+  async enrichVideoFlags(bugs: ZenTaoBugSummary[]): Promise<ZenTaoBugSummary[]> {
+    const result: ZenTaoBugSummary[] = [];
+    for (const bug of bugs) {
+      try {
+        const html = await this.getText("index.php?m=bug&f=view", { bugID: bug.id }, false);
+        const detail = parseBugDetail(html, bug.id, this.baseUrl);
+        result.push({ ...bug, hasVideo: Boolean(detail.hasVideo) });
+      } catch {
+        result.push(bug);
+      }
+    }
+    return result;
+  }
+
+  async preparePromptImages(detail: ZenTaoBugDetail, cacheRoot: string): Promise<ZenTaoBugDetail> {
+    const sources = extractImageSources(detail);
+    const promptImages: string[] = [];
+    for (const source of sources.slice(0, 32)) {
+      try {
+        promptImages.push(await this.downloadPromptImage(detail.id, source, cacheRoot));
+      } catch {
+        // Keep the prompt usable even if a single image cannot be downloaded.
+      }
+    }
+    return { ...detail, promptImages };
+  }
+
+  async clearImageCache(cacheRoot: string): Promise<void> {
+    const imageDir = path.join(cacheRoot, "bug-images");
+    await fs.rm(imageDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  private async downloadPromptImage(bugId: string, source: string, cacheRoot: string): Promise<string> {
+    const normalizedSource = source.replace(/&amp;/g, "&");
+    const uri = new URL(normalizedSource, this.baseUrl).toString();
+    const imageDir = path.join(cacheRoot, "bug-images");
+    await fs.mkdir(imageDir, { recursive: true });
+    const digest = crypto.createHash("sha1").update(uri).digest("hex").slice(0, 16);
+    const metaPath = path.join(imageDir, `bug-${safeFilePart(bugId)}-${digest}.json`);
+    const existing = await readImageMeta(metaPath);
+    if (existing?.source === uri && existing.path) {
+      const stat = await fs.stat(existing.path).catch(() => undefined);
+      if (stat && stat.size > 0) {
+        return existing.path;
+      }
+    }
+    const response = await this.request(uri, { method: "GET", ajax: false, headers: { Accept: "image/*" } });
+    const contentType = (response.headers.get("content-type") || "image/png").split(";")[0].trim();
+    if (!contentType.toLowerCase().startsWith("image/")) {
+      throw new Error(`不是图片响应：${contentType}`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const filePath = path.join(imageDir, `bug-${safeFilePart(bugId)}-${digest}${imageExtension(contentType)}`);
+    await fs.writeFile(filePath, bytes);
+    await fs.writeFile(metaPath, JSON.stringify({ source: uri, contentType, path: filePath, savedAt: new Date().toISOString() }, null, 2), "utf8");
+    return filePath;
   }
 
   private async inlinePreviewImages(detail: ZenTaoBugDetail): Promise<ZenTaoBugDetail> {
@@ -1084,6 +1145,19 @@ function parseBugDetail(html: string, bugId: string, baseUrl: string): ZenTaoBug
     .find((item) => item && item !== bugId);
   const text = htmlText(html);
 
+  const attachments = matchAll(html, /<a\b[^>]*href=["']([^"']*(?:file|download)[^"']*)["'][^>]*>[\s\S]*?<\/a>/gi)
+    .map((item) => {
+      const rawUrl = item.match(/href=["']([^"']+)["']/i)?.[1];
+      const url = rawUrl ? new URL(rawUrl.replace(/&amp;/g, "&"), baseUrl).toString() : undefined;
+      const name = htmlText(item);
+      return {
+        name,
+        url,
+        kind: classifyAttachment(name, url)
+      };
+    })
+    .filter((item) => item.name);
+
   return {
     id: bugId,
     title: title || `Bug #${bugId}`,
@@ -1097,16 +1171,65 @@ function parseBugDetail(html: string, bugId: string, baseUrl: string): ZenTaoBug
     expectedResult: htmlText(expectedResultHtml ?? "") || undefined,
     expectedResultHtml,
     actualResult: htmlText(actualResultHtml ?? "") || undefined,
-    attachments: matchAll(html, /<a\b[^>]*href=["']([^"']*(?:file|download)[^"']*)["'][^>]*>[\s\S]*?<\/a>/gi)
-      .map((item) => ({
-        name: htmlText(item),
-        url: item.match(/href=["']([^"']+)["']/i)?.[1]
-      }))
-      .filter((item) => item.name),
+    attachments,
+    videos: attachments.filter((item) => item.kind === "video"),
+    hasVideo: attachments.some((item) => item.kind === "video"),
     comments: matchAll(html, /class=["'][^"']*(?:comment|history|actions|item)[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi)
       .map((item) => ({ content: htmlText(item) }))
       .filter((item) => item.content)
   };
+}
+
+function extractImageSources(detail: ZenTaoBugDetail): string[] {
+  const sources = [
+    ...extractImagesFromHtml(detail.descriptionHtml),
+    ...extractImagesFromHtml(detail.reproduceStepsHtml),
+    ...extractImagesFromHtml(detail.expectedResultHtml)
+  ];
+  return [...new Set(sources)].filter((item) => !/^data:/i.test(item));
+}
+
+function extractImagesFromHtml(html: string | undefined): string[] {
+  if (!html) return [];
+  const urls: string[] = [];
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = match[0] ?? "";
+    const url = readImageAttr(tag, "data-original-src") || readImageAttr(tag, "src");
+    if (url) urls.push(url);
+  }
+  return urls;
+}
+
+function readImageAttr(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`\\b${name}=["']([^"']+)["']`, "i"))?.[1];
+}
+
+function classifyAttachment(name?: string, url?: string): "image" | "video" | "file" {
+  const value = `${name ?? ""} ${url ?? ""}`.toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp|svg)(?:[?#\s]|$)/i.test(value)) return "image";
+  if (/\.(mp4|mov|m4v|webm|avi|mkv|flv|wmv)(?:[?#\s]|$)/i.test(value)) return "video";
+  return "file";
+}
+
+async function readImageMeta(metaPath: string): Promise<{ source?: string; path?: string } | undefined> {
+  try {
+    return JSON.parse(await fs.readFile(metaPath, "utf8")) as { source?: string; path?: string };
+  } catch {
+    return undefined;
+  }
+}
+
+function imageExtension(contentType: string): string {
+  const value = contentType.toLowerCase();
+  if (value.includes("jpeg") || value.includes("jpg")) return ".jpg";
+  if (value.includes("gif")) return ".gif";
+  if (value.includes("webp")) return ".webp";
+  if (value.includes("svg")) return ".svg";
+  return ".png";
+}
+
+function safeFilePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 function readBugTitle(html: string, bugId: string): string | undefined {

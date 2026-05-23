@@ -34,6 +34,7 @@ export interface ZenTaoBugSummary {
   assignedTo?: string;
   openedBy?: string;
   confirmed?: boolean;
+  hasVideo?: boolean;
 }
 
 export interface ZenTaoProject {
@@ -71,12 +72,15 @@ export interface ZenTaoBugDetail extends ZenTaoBugSummary {
   expectedResultHtml?: string;
   actualResult?: string;
   attachments: ZenTaoAttachment[];
+  promptImages?: string[];
+  videos?: ZenTaoAttachment[];
   comments: ZenTaoComment[];
 }
 
 export interface ZenTaoAttachment {
   name: string;
   url?: string;
+  kind?: "image" | "video" | "file";
 }
 
 export interface ZenTaoComment {

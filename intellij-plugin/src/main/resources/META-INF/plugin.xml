@@ -17,5 +17,10 @@
             anchor="right"
             icon="/META-INF/pluginIcon.svg"
             factoryClass="com.zentao.bugassistant.ZenTaoBugAssistantToolWindowFactory" />
+        <applicationConfigurable
+            id="com.zentao.bugassistant.settings"
+            displayName="ZenTao Bug Assistant"
+            instance="com.zentao.bugassistant.ZenTaoSettingsConfigurable" />
+        <fileEditorProvider implementation="com.zentao.bugassistant.ZenTaoPreviewFileEditorProvider" />
     </extensions>
 </idea-plugin>
