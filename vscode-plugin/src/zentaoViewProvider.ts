@@ -1,4 +1,4 @@
-import * as vscode from "vscode";
+﻿import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import {
   buildBatchBugFixPrompt,
@@ -15,9 +15,6 @@ import {
   type ZenTaoProject,
   type ZenTaoSession
 } from "./core";
-
-const debugEndpoint = "http://127.0.0.1:7837/ingest/16d23de6-52c7-4de0-86a3-b3263b8c05ca";
-const debugSessionId = "4538d4";
 
 interface ViewState {
   loggedIn: boolean;
@@ -97,13 +94,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   }
 
   private async refreshOnViewOpen(): Promise<void> {
-    // #region agent log
-    debugLog("O1,O2", "vscode-plugin/src/zentaoViewProvider.ts:85", "view open auto refresh starting", {
-      selectedProjectId: this.state.selectedProjectId,
-      assigneeScope: this.state.assigneeScope,
-      bugCategoryFilters: this.state.bugCategoryFilters
-    });
-    // #endregion
     await this.refresh();
   }
 
@@ -183,15 +173,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
         await this.loadProjects(false);
       }
       this.updateStatus(`正在拉取 Bug 列表（项目：${this.state.selectedProjectId ?? "全部"}）...`);
-      // #region agent log
-      debugLog("B1,B2,B5", "vscode-plugin/src/zentaoViewProvider.ts:124", "refresh bug list starting", {
-        projectCount: this.state.projects.length,
-        selectedProjectId: this.state.selectedProjectId,
-        assigneeScope: this.state.assigneeScope,
-        assignee: this.state.assignee,
-        teamMemberCount: this.state.teamMembers.length
-      });
-      // #endregion
       const bugs = await this.withAutoLoginRetry(() => this.client!.listBugs({
         projectId: this.state.selectedProjectId,
         assigneeScope: "all",
@@ -199,13 +180,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       }));
       this.updateStatus(`已拉取 ${bugs.length} 个 Bug，正在补全附件状态...`);
       this.state.bugs = await this.withAutoLoginRetry(() => this.client!.enrichVideoFlags(bugs));
-      // #region agent log
-      debugLog("B2,B5", "vscode-plugin/src/zentaoViewProvider.ts:137", "refresh bug list completed", {
-        bugCount: this.state.bugs.length,
-        firstBugId: this.state.bugs[0]?.id,
-        firstBugTitle: this.state.bugs[0]?.title
-      });
-      // #endregion
       this.state.selectedIds = [];
       this.state.status = `共 ${this.state.bugs.length} 个 Bug`;
       if (!this.state.bugs.length) {
@@ -222,12 +196,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
 
     const debugInfo = await this.withAutoLoginRetry(() => this.client!.crawlBugAccessDebugInfo(this.state.selectedProjectId));
-    // #region agent log
-    debugLog("C1,C2,C3,C4", "vscode-plugin/src/zentaoViewProvider.ts:159", "automatic bug access crawl completed", {
-      selectedProjectId: this.state.selectedProjectId,
-      debugInfo
-    });
-    // #endregion
   }
 
   private async loadProjects(forceRefresh = false): Promise<void> {
@@ -237,25 +205,12 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
     if (this.state.projects.length && !forceRefresh) {
       this.reconcileSelectedProject();
-      // #region agent log
-      debugLog("P3,P4,P5", "vscode-plugin/src/zentaoViewProvider.ts:165", "cached projects reused", {
-        selectedProjectId: this.state.selectedProjectId,
-        projectCount: this.state.projects.length
-      });
-      // #endregion
       return;
     }
 
     this.state.projects = await this.withAutoLoginRetry(() => this.client!.listProjects());
     this.reconcileSelectedProject();
     await this.savePreferences();
-    // #region agent log
-    debugLog("P3,P4,P5", "vscode-plugin/src/zentaoViewProvider.ts:177", "projects fetched and cached", {
-      forceRefresh,
-      selectedProjectId: this.state.selectedProjectId,
-      projectCount: this.state.projects.length
-    });
-    // #endregion
   }
 
   private reconcileSelectedProject(): void {
@@ -288,27 +243,12 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
     if (this.state.members.length && !forceRefresh) {
       this.reconcileSelectedMember();
-      // #region agent log
-      debugLog("M4,M5", "vscode-plugin/src/zentaoViewProvider.ts:212", "cached members reused", {
-        selectedProjectId: this.state.selectedProjectId,
-        memberCount: this.state.members.length,
-        assignee: this.state.assignee
-      });
-      // #endregion
       return;
     }
 
     this.state.members = await this.withAutoLoginRetry(() => this.client!.listMembers(this.state.selectedProjectId));
     this.reconcileSelectedMember();
     await this.savePreferences();
-    // #region agent log
-    debugLog("M1,M4,M5", "vscode-plugin/src/zentaoViewProvider.ts:226", "members fetched and cached", {
-      forceRefresh,
-      selectedProjectId: this.state.selectedProjectId,
-      memberCount: this.state.members.length,
-      assignee: this.state.assignee
-    });
-    // #endregion
   }
 
   private reconcileSelectedMember(): void {
@@ -451,18 +391,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
     panel.title = `Bug #${detail.id}`;
     panel.reveal(vscode.ViewColumn.Beside);
-    // #region agent log
-    debugLog("PV1,PV2,PV3", "vscode-plugin/src/zentaoViewProvider.ts:365", "bug preview rendered", {
-      bugId: detail.id,
-      hasTitle: Boolean(detail.title),
-      hasDescription: Boolean(detail.description),
-      hasReproduceSteps: Boolean(detail.reproduceSteps),
-      hasExpectedResult: Boolean(detail.expectedResult),
-      hasActualResult: Boolean(detail.actualResult),
-      attachmentCount: detail.attachments.length,
-      commentCount: detail.comments.length
-    });
-    // #endregion
     const previewTitle = detail.description || detail.title || `Bug #${detail.id}`;
     panel.webview.html = `<!doctype html>
 <html lang="zh-CN">
@@ -636,12 +564,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.bugs = [];
       this.state.selectedIds = [];
       await this.savePreferences();
-      // #region agent log
-      debugLog("P3,P4", "vscode-plugin/src/zentaoViewProvider.ts:305", "project preference saved", {
-        selectedProjectId: this.state.selectedProjectId,
-        projectCount: this.state.projects.length
-      });
-      // #endregion
       await this.refresh();
     }
     if (message.type === "refreshProjects") {
@@ -657,22 +579,11 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
         await this.loadMembers(false);
       }
       await this.savePreferences();
-      // #region agent log
-      debugLog("P1,P2", "vscode-plugin/src/zentaoViewProvider.ts:310", "assignee preference saved", {
-        assigneeScope: this.state.assigneeScope,
-        hasAssignee: Boolean(this.state.assignee)
-      });
-      // #endregion
       this.postState();
     }
     if (message.type === "setBugCategoryFilters") {
       this.state.bugCategoryFilters = normalizeBugCategoryFilters(message.bugCategoryFilters);
       await this.savePreferences();
-      // #region agent log
-      debugLog("F1,F2", "vscode-plugin/src/zentaoViewProvider.ts:574", "bug category filters saved", {
-        bugCategoryFilters: this.state.bugCategoryFilters
-      });
-      // #endregion
       this.postState();
     }
     if (message.type === "setAutoLogin") {
@@ -683,11 +594,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     if (message.type === "setAiEngine") {
       this.state.aiEngine = normalizeAiEngine(message.aiEngine);
       await this.config.update("aiEngine", this.state.aiEngine, vscode.ConfigurationTarget.Global);
-      // #region agent log
-      debugLog("AI1,AI2", "vscode-plugin/src/zentaoViewProvider.ts:589", "ai engine preference saved", {
-        aiEngine: this.state.aiEngine
-      });
-      // #endregion
       this.postState();
     }
     if (message.type === "preview" && message.id) {
@@ -866,18 +772,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
           this.startSessionKeepAlive("validated-session");
           return true;
         }
-        // #region agent log
-        debugLog("H4,H7,H14", "vscode-plugin/src/zentaoViewProvider.ts:392", "restored session rejected", {
-          account: this.state.account
-        });
-        // #endregion
       } catch (error) {
-        // #region agent log
-        debugLog("H4,H7,H14", "vscode-plugin/src/zentaoViewProvider.ts:397", "restored session validation failed", {
-          account: this.state.account,
-          message: error instanceof Error ? error.message : String(error)
-        });
-        // #endregion
       }
       await this.clearSessionState();
     }
@@ -888,13 +783,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   private async autoLoginFromSavedCredentials(reason: string): Promise<boolean> {
     const account = await this.context.secrets.get("zentao.account");
     const password = await this.context.secrets.get("zentao.password");
-    // #region agent log
-    debugLog("H6,H7", "vscode-plugin/src/zentaoViewProvider.ts:370", "auto login considered", {
-      reason,
-      hasAccount: Boolean(account),
-      hasPassword: Boolean(password)
-    });
-    // #endregion
     if (!account || !password) {
       return false;
     }
@@ -908,18 +796,8 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.status = `已自动登录：${session.account}`;
       await this.context.secrets.store("zentao.session", JSON.stringify(session));
       this.startSessionKeepAlive(`auto-login:${reason}`);
-      // #region agent log
-      debugLog("H7", "vscode-plugin/src/zentaoViewProvider.ts:389", "auto login succeeded", {
-        account: session.account
-      });
-      // #endregion
       return true;
     } catch (error) {
-      // #region agent log
-      debugLog("H7", "vscode-plugin/src/zentaoViewProvider.ts:397", "auto login failed", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-      // #endregion
       this.client = undefined;
       await this.clearSessionState();
       this.stopSessionKeepAlive();
@@ -937,13 +815,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   private startSessionKeepAlive(reason: string): void {
     this.stopSessionKeepAlive();
     const intervalMs = Math.max(1, this.keepAliveIntervalMinutes) * 60_000;
-    // #region agent log
-    debugLog("H8,H9", "vscode-plugin/src/zentaoViewProvider.ts:438", "session keepalive started", {
-      reason,
-      intervalMs,
-      account: this.state.account
-    });
-    // #endregion
     void this.runSessionKeepAlive(`start:${reason}`);
     this.keepAliveTimer = setInterval(() => {
       void this.runSessionKeepAlive("interval");
@@ -964,23 +835,10 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
     try {
       const valid = await this.client.isSessionValid();
-      // #region agent log
-      debugLog("H8,H10", "vscode-plugin/src/zentaoViewProvider.ts:464", "session keepalive checked", {
-        reason,
-        valid,
-        account: this.state.account
-      });
-      // #endregion
       if (!valid) {
         await this.autoLoginFromSavedCredentials(`keepalive:${reason}`);
       }
     } catch (error) {
-      // #region agent log
-      debugLog("H8,H10", "vscode-plugin/src/zentaoViewProvider.ts:476", "session keepalive check failed", {
-        reason,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      // #endregion
     }
   }
 
@@ -1010,18 +868,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     this.state.bugCategoryFilters = normalizeBugCategoryFilters(this.context.globalState.get<string[]>("zentao.bugCategoryFilters"));
     this.state.aiEngine = normalizeAiEngine(this.config.get<AiEngine>("aiEngine"));
     this.state.autoLoginEnabled = this.config.get<boolean>("autoLogin") ?? true;
-    // #region agent log
-    debugLog("P1,P2", "vscode-plugin/src/zentaoViewProvider.ts:568", "preferences restored", {
-      selectedProjectId: this.state.selectedProjectId,
-      cachedProjectCount: this.state.projects.length,
-      cachedMemberCount: this.state.members.length,
-      assigneeScope: this.state.assigneeScope,
-      hasAssignee: Boolean(this.state.assignee),
-      bugCategoryFilters: this.state.bugCategoryFilters,
-      aiEngine: this.state.aiEngine,
-      autoLoginEnabled: this.state.autoLoginEnabled
-    });
-    // #endregion
   }
 
   private async savePreferences(): Promise<void> {
@@ -1162,26 +1008,12 @@ async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
     if (claudeOpenCmd) {
       try {
         await vscode.commands.executeCommand(claudeOpenCmd, undefined, prompt);
-        // #region agent log
-        debugLog("AI3,AI4", "vscode-plugin/src/zentaoViewProvider.ts:966", "claude code command executed", {
-          engine,
-          command: claudeOpenCmd,
-          promptLength: prompt.length
-        });
-        // #endregion
         vscode.window.showInformationMessage("修复提示词已发送到 Claude Code。");
         return;
       } catch {
         // fall through to clipboard fallback
       }
     }
-    // #region agent log
-    debugLog("AI3,AI5", "vscode-plugin/src/zentaoViewProvider.ts:980", "claude code command not found", {
-      engine,
-      promptLength: prompt.length,
-      availableAiCommandSamples: allCommands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
-    });
-    // #endregion
     vscode.window.showInformationMessage("未找到 Claude Code 扩展，修复提示词已复制到剪贴板，请手动粘贴。");
     return;
   }
@@ -1190,14 +1022,6 @@ async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
   const command = cursorCandidates.find((c) => allCommands.includes(c));
   if (command) {
     const result = await executeCursorCommand(command, prompt);
-    // #region agent log
-    debugLog("AI3,AI4", "vscode-plugin/src/zentaoViewProvider.ts:966", "cursor command executed", {
-      engine,
-      command,
-      result,
-      promptLength: prompt.length
-    });
-    // #endregion
     vscode.window.showInformationMessage(
       result === "failed"
         ? "AI 面板打开失败，修复提示词已复制到剪贴板。"
@@ -1208,13 +1032,6 @@ async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
     return;
   }
 
-  // #region agent log
-  debugLog("AI3,AI5", "vscode-plugin/src/zentaoViewProvider.ts:980", "ai command not found", {
-    engine,
-    promptLength: prompt.length,
-    availableAiCommandSamples: allCommands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
-  });
-  // #endregion
   vscode.window.showInformationMessage("修复提示词已复制到剪贴板，请粘贴到 Cursor 或 Claude Code。");
 }
 
@@ -1339,18 +1156,3 @@ function personAliases(value: string | undefined): string[] {
   return aliases.map((item) => item.toLowerCase()).filter(Boolean);
 }
 
-function debugLog(hypothesisId: string, location: string, message: string, data: Record<string, unknown>): void {
-  fetch(debugEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": debugSessionId },
-    body: JSON.stringify({
-      sessionId: debugSessionId,
-      runId: "post-fix",
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now()
-    })
-  }).catch(() => {});
-}

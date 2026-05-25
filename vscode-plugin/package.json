@@ -114,18 +114,21 @@
       "properties": {
         "zentaoBugAssistant.serverUrl": {
           "type": "string",
-          "default": "http://zentao.yuwan-game.com:8088/",
-          "description": "禅道服务器地址。"
+          "default": "http://your-zentao-server/",
+          "description": "禅道服务器地址，例如 http://zentao.example.com:8080/。"
         },
         "zentaoBugAssistant.aiEngine": {
           "type": "string",
           "enum": [
-            "auto",
             "cursor",
             "claudeCode"
           ],
-          "default": "auto",
-          "description": "默认 AI 引擎。"
+          "enumDescriptions": [
+            "使用 Cursor 内置 AI 聊天",
+            "使用 Claude Code 扩展"
+          ],
+          "default": "claudeCode",
+          "description": "AI 修复引擎。"
         },
         "zentaoBugAssistant.autoLogin": {
           "type": "boolean",

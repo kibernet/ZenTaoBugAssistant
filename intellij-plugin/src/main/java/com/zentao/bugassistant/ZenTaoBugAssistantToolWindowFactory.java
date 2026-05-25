@@ -6,7 +6,6 @@ import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnAction;
-import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.ide.CopyPasteManager;
@@ -21,7 +20,6 @@ import com.intellij.ui.components.JBPasswordField;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.content.Content;
-import com.intellij.ui.content.ContentFactory;
 import com.intellij.util.ui.JBUI;
 import java.awt.BasicStroke;
 import java.awt.Component;
@@ -96,7 +94,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         ZenTaoBugAssistantPanel panel = new ZenTaoBugAssistantPanel(project, toolWindow);
-        Content content = ContentFactory.SERVICE.getInstance().createContent(panel.root, "", false);
+        Content content = ZenTaoPlatformCompat.contentFactory().createContent(panel.root, "", false);
         toolWindow.getContentManager().addContent(content);
     }
 
@@ -1302,13 +1300,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 try {
                     AnAction action = manager.getAction(actionId);
                     if (action != null) {
-                        AnActionEvent event = AnActionEvent.createFromAnAction(
+                        ZenTaoPlatformCompat.performAction(
                                 action,
-                                null,
-                                ActionPlaces.UNKNOWN,
-                                DataManager.getInstance().getDataContext(root)
+                                DataManager.getInstance().getDataContext(root),
+                                ActionPlaces.UNKNOWN
                         );
-                        action.actionPerformed(event);
                         pastePromptIntoClaudeChat(prompt);
                         return;
                     }

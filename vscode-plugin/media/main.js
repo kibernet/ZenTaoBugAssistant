@@ -1,4 +1,4 @@
-const vscode = acquireVsCodeApi();
+﻿const vscode = acquireVsCodeApi();
 const selectedIds = new Set();
 const categoryFilterValues = ["assignedToMe", "unresolved", "resolved", "closed"];
 const bugCategoryFilters = new Set(categoryFilterValues);
@@ -6,8 +6,6 @@ let currentBugPage = 1;
 const bugsPerPage = 20;
 let lastState;
 let categoryFiltersHydrated = false;
-const debugEndpoint = "http://127.0.0.1:7837/ingest/16d23de6-52c7-4de0-86a3-b3263b8c05ca";
-const debugSessionId = "4538d4";
 
 document.getElementById("login").addEventListener("click", () => post("login"));
 document.getElementById("loginState").addEventListener("click", () => post("login"));
@@ -44,21 +42,6 @@ function render(state) {
   renderLoginState(state);
   renderFilters(state);
   renderBugCategoryFilters();
-  // #region agent log
-  debugLog("UX1,UX2,UX3,UX4", "vscode-plugin/media/main.js:26", "webview render state", {
-    loggedIn: Boolean(state.loggedIn),
-    loading: Boolean(state.loading),
-    bugCount: state.bugs?.length ?? 0,
-    aiEngine: state.aiEngine ?? "claudeCode",
-    projectCount: state.projects?.length ?? 0,
-    memberCount: state.members?.length ?? 0,
-    selectedCount: state.selectedIds?.length ?? 0,
-    hasSelectedProject: Boolean(state.selectedProjectId),
-    assigneeScope: state.assigneeScope,
-    autoLoginEnabled: Boolean(state.autoLoginEnabled),
-    status: state.status
-  });
-  // #endregion
   const root = document.getElementById("bugs");
   root.innerHTML = "";
   selectedIds.clear();
@@ -67,13 +50,6 @@ function render(state) {
   }
 
   if (!state.bugs.length) {
-    // #region agent log
-    debugLog("UX1,UX3", "vscode-plugin/media/main.js:43", "empty bug state shown", {
-      loggedIn: Boolean(state.loggedIn),
-      projectCount: state.projects?.length ?? 0,
-      status: state.status
-    });
-    // #endregion
     root.innerHTML = `<p class="empty">暂无 Bug，请先登录或刷新。</p>`;
     renderPagination(0, 0, 0);
     document.getElementById("bugCount").textContent = "共 0 个 Bug";
@@ -414,15 +390,6 @@ function renderFilters(state) {
     assigneeOptions.appendChild(option);
   }
   assignee.value = formatSelectedMember(state.assignee, state.members ?? []);
-  // #region agent log
-  debugLog("UX3", "vscode-plugin/media/main.js:120", "filters rendered", {
-    projectOptions: state.projects?.length ?? 0,
-    memberOptions: state.members?.length ?? 0,
-    selectedProjectIdPresent: Boolean(state.selectedProjectId),
-    assigneeScope: "member",
-    assigneeInputVisible: true
-  });
-  // #endregion
 }
 
 function postAssigneeFilter() {
@@ -465,30 +432,7 @@ function resolveAssigneeValue(value, members) {
 }
 
 function post(type, payload = {}) {
-  // #region agent log
-  debugLog("UX2,UX4", "vscode-plugin/media/main.js:142", "webview action posted", {
-    type,
-    hasPayload: Object.keys(payload).length > 0,
-    selectedCount: selectedIds.size
-  });
-  // #endregion
   vscode.postMessage({ type, ...payload });
-}
-
-function debugLog(hypothesisId, location, message, data) {
-  fetch(debugEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": debugSessionId },
-    body: JSON.stringify({
-      sessionId: debugSessionId,
-      runId: "ux-baseline",
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now()
-    })
-  }).catch(() => {});
 }
 
 function priorityLabel(value) {

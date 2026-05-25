@@ -5,8 +5,37 @@
     <vendor>Kibernet</vendor>
 
     <description><![CDATA[
-        Fetch assigned ZenTao bugs and send fix prompts to Claude Code with GUI.
+        <p>ZenTao Bug Assistant integrates ZenTao bug tracking with IntelliJ IDEA and Claude Code for AI-assisted bug fixing.</p>
+        <p>在 IntelliJ IDEA 侧边栏中登录禅道、查看分配给你的 Bug，一键把 Bug 详情发送给 <b>Claude Code</b> 进行 AI 辅助修复。</p>
+
+        <h3>主要功能</h3>
+        <ul>
+            <li><b>登录禅道</b> — 支持自动保存会话，下次打开自动登录</li>
+            <li><b>查看 Bug 列表</b> — 按项目、成员、状态（未解决 / 已解决 / 已关闭）筛选</li>
+            <li><b>仅看我的</b> — 一键过滤出指派给自己的 Bug</li>
+            <li><b>预览 Bug 详情</b> — 在编辑器标签页中渲染重现步骤、截图和附件</li>
+            <li><b>AI 一键修复</b> — 把 Bug 描述和截图整理成提示词，直接发送到 Claude Code</li>
+            <li><b>批量修复</b> — 对当前列表中所有未解决 Bug 逐一生成提示词并发送</li>
+            <li><b>禅道状态同步</b> — 行内执行指派、确认、解决、关闭、激活操作</li>
+        </ul>
+
+        <h3>使用前提</h3>
+        <ul>
+            <li>已安装 <a href="https://plugins.jetbrains.com/plugin/22653-claude-code">Claude Code</a> 插件</li>
+            <li>可访问自己团队的禅道服务器（支持禅道 17+ 的 Web 界面）</li>
+        </ul>
     ]]></description>
+
+    <change-notes><![CDATA[
+        <h3>1.0.0</h3>
+        <ul>
+            <li>首次发布</li>
+            <li>支持登录禅道并查看 Bug 列表</li>
+            <li>支持按项目、成员、状态筛选</li>
+            <li>支持 AI 一键修复（发送提示词到 Claude Code）</li>
+            <li>支持禅道工作流操作（指派、确认、解决、关闭、激活）</li>
+        </ul>
+    ]]></change-notes>
 
     <idea-version since-build="211"/>
     <depends>com.intellij.modules.platform</depends>
