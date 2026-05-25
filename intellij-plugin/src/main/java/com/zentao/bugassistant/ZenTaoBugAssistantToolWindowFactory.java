@@ -87,6 +87,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
         private static final int PAGE_SIZE = 20;
         private static final int DEFAULT_KEEP_ALIVE_MINUTES = 5;
+        private static final Duration HTTP_CONNECT_TIMEOUT = Duration.ofSeconds(15);
+        private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofSeconds(45);
         private static final List<String> FILTER_KEYS = List.of("assignedToMe", "unresolved", "resolved", "closed");
         private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Chat", "claude-code.chat", "claudeCode.chat", "ClaudeCode.NewChat", "claude-code.newChat", "claudeCode.newChat", "ClaudeCode.Open", "claude-code.open", "claudeCode.open");
         private static final String SUPPRESS_ERROR_POPUP_KEY = "zentao.idea.suppressErrorPopup";
@@ -432,12 +434,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     return;
                 }
                 if (!client.loggedIn()) return;
-                runAsync("正在保持禅道会话...", () -> {
-                    if (!client.isSessionValid() && canRetryLogin()) {
-                        client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
-                    }
-                    return true;
-                }, ignored -> savePreferences());
+                runKeepAlive();
             });
             keepAliveTimer.setInitialDelay(minutes * 60 * 1000);
             keepAliveTimer.start();
@@ -987,6 +984,47 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
+        private void runKeepAlive() {
+            if (project.isDisposed() || !client.loggedIn()) {
+                return;
+            }
+            new SwingWorker<Boolean, Void>() {
+                @Override
+                protected Boolean doInBackground() {
+                    try {
+                        if (client.isSessionValid()) {
+                            return true;
+                        }
+                        if (canRetryLogin()) {
+                            client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                            return true;
+                        }
+                        return false;
+                    } catch (Exception error) {
+                        debugLog("keepalive-failed", readableError(rootCause(error)));
+                        return false;
+                    }
+                }
+
+                @Override
+                protected void done() {
+                    if (project.isDisposed()) {
+                        return;
+                    }
+                    try {
+                        if (Boolean.TRUE.equals(get())) {
+                            setStatus("禅道会话保活成功");
+                            savePreferences();
+                        } else {
+                            setStatus("会话保活跳过：网络超时或禅道暂不可达，将在下次间隔重试");
+                        }
+                    } catch (Exception ignored) {
+                        setStatus("会话保活跳过：网络超时或禅道暂不可达，将在下次间隔重试");
+                    }
+                }
+            }.execute();
+        }
+
         private <T> void runAsync(String status, ThrowingSupplier<T> supplier, java.util.function.Consumer<T> onSuccess) {
             if (project.isDisposed()) return;
             setLoading(true, status);
@@ -1114,6 +1152,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private static String briefStatusError(Throwable error) {
+            if (isTransientNetworkError(error)) {
+                return "网络请求超时，请检查禅道地址或网络连接";
+            }
             String message = error.getMessage();
             if (message == null || message.isBlank()) {
                 return "操作失败";
@@ -1187,6 +1228,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             while (current != null) {
                 String message = current.getMessage();
                 if (message != null && (message.contains("登录已超时") || message.contains("重新登录"))) return true;
+                current = current.getCause();
+            }
+            return false;
+        }
+
+        private static boolean isTransientNetworkError(Throwable error) {
+            Throwable current = error;
+            while (current != null) {
+                if (current instanceof java.net.http.HttpTimeoutException
+                        || current instanceof java.net.ConnectException
+                        || current instanceof java.net.UnknownHostException) {
+                    return true;
+                }
+                String message = current.getMessage();
+                if (message != null && message.toLowerCase(Locale.ROOT).contains("timed out")) {
+                    return true;
+                }
                 current = current.getCause();
             }
             return false;
@@ -1556,7 +1614,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final class ZenTaoClient {
             private final Map<String, String> cookieJar = new LinkedHashMap<>();
             private final HttpClient http = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(10))
+                    .connectTimeout(HTTP_CONNECT_TIMEOUT)
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
             private String baseUrl = DEFAULT_SERVER;
@@ -2203,7 +2261,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private String get(String path, Map<String, String> params, boolean ajax) throws Exception {
-                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(Duration.ofSeconds(15)).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
+                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(HTTP_REQUEST_TIMEOUT).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
                 if (ajax) builder.header("X-Requested-With", "XMLHttpRequest");
                 addCookieHeader(builder);
                 HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -2229,7 +2287,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
             private String post(String path, Map<String, String> params, Map<String, String> form, String refererPath, boolean ajax) throws Exception {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params))
-                        .timeout(Duration.ofSeconds(15))
+                        .timeout(HTTP_REQUEST_TIMEOUT)
                         .POST(HttpRequest.BodyPublishers.ofString(encode(form)))
                         .header("Accept", ajax ? "application/json, text/javascript, */*; q=0.01" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -2620,7 +2678,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             private String downloadPromptImage(String bugId, String src) throws Exception {
                 URI uri = resolveResourceUri(src);
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
-                        .timeout(Duration.ofSeconds(15))
+                        .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
                         .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
                         .header("Accept", "image/*");
@@ -2643,7 +2701,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             private String downloadPreviewImage(String src) throws Exception {
                 URI uri = resolveResourceUri(src);
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
-                        .timeout(Duration.ofSeconds(15))
+                        .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
                         .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
                         .header("Accept", "image/*,*/*;q=0.8");
