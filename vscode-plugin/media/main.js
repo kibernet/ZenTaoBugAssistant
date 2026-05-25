@@ -40,7 +40,7 @@ function render(state) {
   hydrateCategoryFilters(state);
   document.getElementById("status").textContent = state.status;
   document.getElementById("autoLogin").checked = Boolean(state.autoLoginEnabled);
-  document.getElementById("aiEngine").value = state.aiEngine ?? "auto";
+  document.getElementById("aiEngine").value = state.aiEngine ?? "claudeCode";
   renderLoginState(state);
   renderFilters(state);
   renderBugCategoryFilters();
@@ -49,7 +49,7 @@ function render(state) {
     loggedIn: Boolean(state.loggedIn),
     loading: Boolean(state.loading),
     bugCount: state.bugs?.length ?? 0,
-    aiEngine: state.aiEngine ?? "auto",
+    aiEngine: state.aiEngine ?? "claudeCode",
     projectCount: state.projects?.length ?? 0,
     memberCount: state.members?.length ?? 0,
     selectedCount: state.selectedIds?.length ?? 0,

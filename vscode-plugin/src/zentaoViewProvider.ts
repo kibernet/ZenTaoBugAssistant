@@ -57,7 +57,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     members: [],
     bugCategoryFilters: ["assignedToMe", "unresolved", "resolved", "closed"],
     selectedIds: [],
-    aiEngine: "auto",
+    aiEngine: "claudeCode",
     autoLoginEnabled: true,
     status: "就绪",
     loading: false
@@ -1089,7 +1089,6 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
         <button id="fixSelected" class="ai-fix-button">AI一键修复</button>
         <button id="clearImageCache" title="清理本地缓存图片">清理缓存</button>
         <select id="aiEngine" title="选择修复使用的 AI">
-          <option value="auto">自动选择</option>
           <option value="cursor">Cursor</option>
           <option value="claudeCode">Claude Code</option>
         </select>
@@ -1154,32 +1153,49 @@ function formatErrorDetail(value: string): string {
 async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
   await vscode.env.clipboard.writeText(prompt);
 
-  const commandCandidates =
-    engine === "cursor"
-      ? ["cursor.openChat", "workbench.action.chat.open", "workbench.action.chat.openEditSession"]
-      : engine === "claudeCode"
-        ? ["claude-code.chat", "claudeCode.chat", "claude-code.open", "claudeCode.open", "ClaudeCode.Chat", "ClaudeCode.Open"]
-        : [
-            "cursor.openChat",
-            "workbench.action.chat.open",
-            "workbench.action.chat.openEditSession",
-            "claude-code.open",
-            "claudeCode.open",
-            "claude-code.chat",
-            "claudeCode.chat"
-          ];
+  const allCommands = await vscode.commands.getCommands(true);
 
-  const commands = await vscode.commands.getCommands(true);
-  const command = commandCandidates.find((candidate) => commands.includes(candidate));
-  if (command) {
-    const result = await executeAiCommand(command, prompt);
+  if (engine === "claudeCode") {
+    // claude-vscode.editor.open(sessionId, initialPrompt, viewColumn) — second arg is the prompt
+    // auto-submitted when the panel opens (data-initial-prompt mechanism in the extension webview)
+    const claudeOpenCmd = ["claude-vscode.editor.open", "claude-vscode.primaryEditor.open"].find((c) => allCommands.includes(c));
+    if (claudeOpenCmd) {
+      try {
+        await vscode.commands.executeCommand(claudeOpenCmd, undefined, prompt);
+        // #region agent log
+        debugLog("AI3,AI4", "vscode-plugin/src/zentaoViewProvider.ts:966", "claude code command executed", {
+          engine,
+          command: claudeOpenCmd,
+          promptLength: prompt.length
+        });
+        // #endregion
+        vscode.window.showInformationMessage("修复提示词已发送到 Claude Code。");
+        return;
+      } catch {
+        // fall through to clipboard fallback
+      }
+    }
     // #region agent log
-    debugLog("AI3,AI4", "vscode-plugin/src/zentaoViewProvider.ts:966", "ai command executed", {
+    debugLog("AI3,AI5", "vscode-plugin/src/zentaoViewProvider.ts:980", "claude code command not found", {
+      engine,
+      promptLength: prompt.length,
+      availableAiCommandSamples: allCommands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
+    });
+    // #endregion
+    vscode.window.showInformationMessage("未找到 Claude Code 扩展，修复提示词已复制到剪贴板，请手动粘贴。");
+    return;
+  }
+
+  const cursorCandidates = ["cursor.openChat", "workbench.action.chat.open", "workbench.action.chat.openEditSession"];
+  const command = cursorCandidates.find((c) => allCommands.includes(c));
+  if (command) {
+    const result = await executeCursorCommand(command, prompt);
+    // #region agent log
+    debugLog("AI3,AI4", "vscode-plugin/src/zentaoViewProvider.ts:966", "cursor command executed", {
       engine,
       command,
       result,
-      promptLength: prompt.length,
-      availableAiCommandSamples: commands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
+      promptLength: prompt.length
     });
     // #endregion
     vscode.window.showInformationMessage(
@@ -1196,13 +1212,13 @@ async function sendPromptToAi(prompt: string, engine: AiEngine): Promise<void> {
   debugLog("AI3,AI5", "vscode-plugin/src/zentaoViewProvider.ts:980", "ai command not found", {
     engine,
     promptLength: prompt.length,
-    availableAiCommandSamples: commands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
+    availableAiCommandSamples: allCommands.filter((item) => /cursor|claude|chat/i.test(item)).slice(0, 30)
   });
   // #endregion
   vscode.window.showInformationMessage("修复提示词已复制到剪贴板，请粘贴到 Cursor 或 Claude Code。");
 }
 
-async function executeAiCommand(command: string, prompt: string): Promise<"sent-with-query" | "sent-with-prompt" | "sent-as-string" | "opened-with-clipboard" | "failed"> {
+async function executeCursorCommand(command: string, prompt: string): Promise<"sent-with-query" | "sent-with-prompt" | "sent-as-string" | "opened-with-clipboard" | "failed"> {
   const argumentShapes = [
     { args: { query: prompt, isPartialQuery: false }, result: "sent-with-query" as const },
     { args: { prompt }, result: "sent-with-prompt" as const },
@@ -1218,7 +1234,7 @@ async function executeAiCommand(command: string, prompt: string): Promise<"sent-
       }
       return result;
     } catch {
-      // Some AI extensions do not accept command arguments; try the next shape.
+      // try next argument shape
     }
   }
   return "failed";
@@ -1258,7 +1274,7 @@ function normalizeAssigneeScope(value: BugAssigneeScope | undefined): BugAssigne
 }
 
 function normalizeAiEngine(value: AiEngine | undefined): AiEngine {
-  return value === "cursor" || value === "claudeCode" ? value : "auto";
+  return value === "cursor" || value === "claudeCode" ? value : "claudeCode";
 }
 
 function normalizeProjects(value: ZenTaoProject[] | undefined): ZenTaoProject[] {

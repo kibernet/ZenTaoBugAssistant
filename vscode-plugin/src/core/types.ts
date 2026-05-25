@@ -1,4 +1,4 @@
-export type AiEngine = "auto" | "cursor" | "claudeCode";
+export type AiEngine = "cursor" | "claudeCode";
 
 export type BugPriority = "high" | "medium" | "low" | "unknown";
 
