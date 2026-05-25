@@ -6,9 +6,32 @@ let currentBugPage = 1;
 const bugsPerPage = 20;
 let lastState;
 let categoryFiltersHydrated = false;
+let memberDropdownActiveIndex = -1;
+let memberDropdownMouseDown = false;
 
-document.getElementById("login").addEventListener("click", () => post("login"));
-document.getElementById("loginState").addEventListener("click", () => post("login"));
+const PASSWORD_MASK = "********";
+
+document.getElementById("login").addEventListener("click", () => postLogin());
+document.getElementById("loginState").addEventListener("click", () => postLogin());
+document.getElementById("serverUrl").addEventListener("change", (event) => {
+  post("setServerUrl", { serverUrl: event.target.value });
+});
+document.getElementById("serverUrl").addEventListener("blur", (event) => {
+  post("setServerUrl", { serverUrl: event.target.value });
+});
+document.getElementById("account").addEventListener("change", (event) => {
+  post("setLoginAccount", { loginAccount: event.target.value });
+});
+document.getElementById("account").addEventListener("blur", (event) => {
+  post("setLoginAccount", { loginAccount: event.target.value });
+});
+document.getElementById("password").addEventListener("focus", (event) => {
+  const input = event.target;
+  if (input.dataset.saved === "true") {
+    input.value = "";
+    input.dataset.saved = "false";
+  }
+});
 document.getElementById("autoLogin").addEventListener("change", (event) => {
   post("setAutoLogin", { autoLoginEnabled: event.target.checked });
 });
@@ -21,10 +44,20 @@ document.getElementById("aiEngine").addEventListener("change", (event) => {
 document.getElementById("refreshProjects").addEventListener("click", () => post("refreshProjects"));
 document.getElementById("refreshMembers").addEventListener("click", () => post("refreshMembers"));
 document.getElementById("project").addEventListener("change", (event) => {
+  clearSelectedMemberFilter();
+  if (lastState) {
+    lastState = {
+      ...lastState,
+      assignee: undefined,
+      bugs: [],
+      members: [],
+      selectedIds: [],
+      selectedProjectId: event.target.value || undefined
+    };
+  }
   post("selectProject", { projectId: event.target.value });
 });
-document.getElementById("assignee").addEventListener("change", () => postAssigneeFilter());
-document.getElementById("assignee").addEventListener("blur", () => postAssigneeFilter());
+setupMemberPicker();
 
 window.addEventListener("message", (event) => {
   if (event.data.type !== "state") {
@@ -36,11 +69,30 @@ window.addEventListener("message", (event) => {
 function render(state) {
   lastState = state;
   hydrateCategoryFilters(state);
-  document.getElementById("status").textContent = state.status;
+  const serverInput = document.getElementById("serverUrl");
+  if (document.activeElement !== serverInput) {
+    serverInput.value = state.serverUrl ?? "";
+  }
+  const accountInput = document.getElementById("account");
+  if (document.activeElement !== accountInput) {
+    accountInput.value = state.loginAccount ?? "";
+  }
+  const passwordInput = document.getElementById("password");
+  if (document.activeElement !== passwordInput) {
+    if (state.hasSavedPassword) {
+      passwordInput.value = PASSWORD_MASK;
+      passwordInput.dataset.saved = "true";
+    } else if (passwordInput.dataset.saved === "true") {
+      passwordInput.value = "";
+      passwordInput.dataset.saved = "false";
+    }
+  }
   document.getElementById("autoLogin").checked = Boolean(state.autoLoginEnabled);
   document.getElementById("aiEngine").value = state.aiEngine ?? "claudeCode";
   renderLoginState(state);
   renderFilters(state);
+  const filteredBugs = state.bugs.length ? filterBugs(state.bugs, state) : [];
+  renderStatusSummary(state, filteredBugs);
   renderBugCategoryFilters();
   const root = document.getElementById("bugs");
   root.innerHTML = "";
@@ -52,18 +104,15 @@ function render(state) {
   if (!state.bugs.length) {
     root.innerHTML = `<p class="empty">暂无 Bug，请先登录或刷新。</p>`;
     renderPagination(0, 0, 0);
-    document.getElementById("bugCount").textContent = "共 0 个 Bug";
     updateAiFixButton([]);
     return;
   }
 
-  const filteredBugs = filterBugs(state.bugs, state);
   updateAiFixButton(filteredBugs);
   const totalPages = Math.max(1, Math.ceil(filteredBugs.length / bugsPerPage));
   currentBugPage = Math.min(Math.max(1, currentBugPage), totalPages);
   const start = (currentBugPage - 1) * bugsPerPage;
   const pageBugs = filteredBugs.slice(start, start + bugsPerPage);
-  document.getElementById("bugCount").textContent = `共 ${filteredBugs.length} 个 Bug / 总 ${state.bugs.length} 个`;
 
   if (!pageBugs.length) {
     const filterHint = state.bugs.length
@@ -188,6 +237,7 @@ function renderBugCategoryFilters() {
   root.querySelectorAll("input").forEach((input) => {
     input.addEventListener("change", () => {
       if (input.value === "assignedToMe" && input.checked && isMineFilterDisabled(lastState)) {
+        clearSelectedMemberFilter();
         post("setAssigneeScope", { assigneeScope: "member", assignee: undefined });
       }
       if (input.checked) {
@@ -359,12 +409,39 @@ function renderPagination(total, page, totalPages) {
   });
 }
 
+function renderStatusSummary(state, filteredBugs) {
+  const statusEl = document.getElementById("status");
+  if (state.loading || !state.bugs.length) {
+    statusEl.textContent = state.status;
+    return;
+  }
+  statusEl.textContent = filteredBugs.length === state.bugs.length
+    ? `共 ${state.bugs.length} 个 Bug`
+    : `共 ${filteredBugs.length} 个 Bug / 总 ${state.bugs.length} 个`;
+}
+
 function renderLoginState(state) {
+  const loginButton = document.getElementById("login");
   const loginState = document.getElementById("loginState");
-  document.getElementById("login").style.display = state.loggedIn ? "none" : "inline-block";
-  loginState.textContent = state.loggedIn ? `已登录：${state.account ?? ""}` : "未登录";
-  loginState.className = `login-state ${state.loggedIn ? "logged-in" : "logged-out"}`;
-  loginState.title = state.loggedIn ? "点击重新登录" : "点击登录";
+  const autoLogin = document.querySelector(".auto-login");
+
+  if (state.loggedIn) {
+    loginButton.style.display = "none";
+    autoLogin.style.display = "inline-flex";
+    autoLogin.hidden = false;
+    loginState.style.display = "inline-block";
+    loginState.hidden = false;
+    loginState.textContent = `已登录：${state.account ?? ""}`;
+    loginState.className = "login-state logged-in";
+    loginState.title = "点击重新登录";
+    return;
+  }
+
+  loginButton.style.display = "inline-block";
+  autoLogin.style.display = "none";
+  loginState.style.display = "none";
+  loginState.hidden = true;
+  autoLogin.hidden = true;
 }
 
 function renderFilters(state) {
@@ -381,15 +458,139 @@ function renderFilters(state) {
   project.value = state.selectedProjectId ?? currentProject ?? "";
 
   const assignee = document.getElementById("assignee");
-  const assigneeOptions = document.getElementById("assigneeOptions");
-  assigneeOptions.innerHTML = "";
-  for (const member of state.members ?? []) {
-    const option = document.createElement("option");
-    option.value = formatMemberOption(member);
-    option.label = member.account === member.name ? member.account : member.account;
-    assigneeOptions.appendChild(option);
+  if (document.activeElement !== assignee) {
+    assignee.value = formatSelectedMember(state.assignee, state.members ?? []);
   }
-  assignee.value = formatSelectedMember(state.assignee, state.members ?? []);
+  if (document.activeElement === assignee) {
+    renderMemberDropdown(filterMembers(assignee.value, state.members ?? []));
+  } else {
+    hideMemberDropdown();
+  }
+}
+
+function setupMemberPicker() {
+  const assignee = document.getElementById("assignee");
+  const dropdown = document.getElementById("memberDropdown");
+
+  assignee.addEventListener("focus", () => {
+    renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+  });
+  assignee.addEventListener("input", () => {
+    memberDropdownActiveIndex = -1;
+    renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+  });
+  assignee.addEventListener("keydown", (event) => {
+    const items = dropdown.querySelectorAll(".member-dropdown-item");
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (dropdown.hidden && items.length) {
+        renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+        return;
+      }
+      memberDropdownActiveIndex = Math.min(memberDropdownActiveIndex + 1, items.length - 1);
+      highlightMemberDropdownItem(items);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      memberDropdownActiveIndex = Math.max(memberDropdownActiveIndex - 1, 0);
+      highlightMemberDropdownItem(items);
+    } else if (event.key === "Enter") {
+      if (memberDropdownActiveIndex >= 0 && items[memberDropdownActiveIndex]) {
+        event.preventDefault();
+        selectMemberFromDropdown(items[memberDropdownActiveIndex]);
+      } else {
+        hideMemberDropdown();
+        postAssigneeFilter();
+      }
+    } else if (event.key === "Escape") {
+      hideMemberDropdown();
+    }
+  });
+  assignee.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (memberDropdownMouseDown) {
+        return;
+      }
+      hideMemberDropdown();
+      postAssigneeFilter();
+    }, 150);
+  });
+  dropdown.addEventListener("mousedown", () => {
+    memberDropdownMouseDown = true;
+  });
+  document.addEventListener("mouseup", () => {
+    memberDropdownMouseDown = false;
+  });
+}
+
+function filterMembers(query, members) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (!needle) {
+    return members;
+  }
+  return members.filter((member) => matchesMemberSearch(member, needle));
+}
+
+function matchesMemberSearch(member, needle) {
+  if (!needle) {
+    return true;
+  }
+  const account = String(member.account ?? "").toLowerCase();
+  const name = String(member.name ?? "").toLowerCase();
+  const label = formatMemberOption(member).toLowerCase();
+  return account.includes(needle) || name.includes(needle) || label.includes(needle);
+}
+
+function renderMemberDropdown(members) {
+  const dropdown = document.getElementById("memberDropdown");
+  dropdown.innerHTML = "";
+  memberDropdownActiveIndex = -1;
+  if (!members.length) {
+    dropdown.hidden = true;
+    return;
+  }
+  for (const member of members) {
+    const item = document.createElement("div");
+    item.className = "member-dropdown-item";
+    item.textContent = formatMemberOption(member);
+    item.dataset.account = member.account;
+    item.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      selectMemberFromDropdown(item);
+    });
+    dropdown.appendChild(item);
+  }
+  dropdown.hidden = false;
+}
+
+function highlightMemberDropdownItem(items) {
+  for (let index = 0; index < items.length; index += 1) {
+    items[index].classList.toggle("active", index === memberDropdownActiveIndex);
+  }
+  if (memberDropdownActiveIndex >= 0 && items[memberDropdownActiveIndex]) {
+    items[memberDropdownActiveIndex].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function selectMemberFromDropdown(item) {
+  const assignee = document.getElementById("assignee");
+  assignee.value = item.textContent ?? "";
+  hideMemberDropdown();
+  postAssigneeFilter();
+}
+
+function hideMemberDropdown() {
+  const dropdown = document.getElementById("memberDropdown");
+  dropdown.hidden = true;
+  memberDropdownActiveIndex = -1;
+}
+
+function clearSelectedMemberFilter() {
+  const assignee = document.getElementById("assignee");
+  assignee.value = "";
+  hideMemberDropdown();
+  if (lastState) {
+    lastState = { ...lastState, assignee: undefined };
+  }
 }
 
 function postAssigneeFilter() {
@@ -429,6 +630,13 @@ function resolveAssigneeValue(value, members) {
   const explicitAccount = text.includes("|") ? text.split("|").pop().trim() : text;
   const matched = members.find((member) => formatMemberOption(member) === text || member.account === explicitAccount || member.name === text);
   return matched?.account ?? explicitAccount;
+}
+
+function postLogin() {
+  post("login", {
+    account: document.getElementById("account").value,
+    password: document.getElementById("password").value
+  });
 }
 
 function post(type, payload = {}) {

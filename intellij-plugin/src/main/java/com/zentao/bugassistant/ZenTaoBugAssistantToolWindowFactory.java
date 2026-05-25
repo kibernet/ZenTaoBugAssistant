@@ -121,7 +121,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final ComboBox<Item> memberBox = new ComboBox<>();
         private final JPanel memberWrap = new JPanel(new BorderLayout(6, 0));
         private final Map<String, JCheckBox> filterChecks = new LinkedHashMap<>();
-        private final JLabel bugCountLabel = new JLabel("共 0 个 Bug");
         private final SolidButton refreshButton = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
         private final GradientButton aiFixAllButton = new GradientButton("AI一键修复", true, true);
         private final SolidButton clearImageCacheButton = solidButton("清理缓存", BTN_PRIMARY_BG, ARC_PILL);
@@ -213,31 +212,38 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             top.add(buildHeaderLogo(), c);
             c.gridwidth = 1;
             addRow(top, c, 1, "禅道地址", serverField);
-            addRow(top, c, 2, "禅道账号", accountField);
-            addRow(top, c, 3, "禅道密码", passwordField);
+            addRow(top, c, 2, "禅道账号", buildCredentialRow());
             JPanel loginRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
             loginRow.setOpaque(false);
             loginRow.add(autoLoginBox);
             loginRow.add(loginButton);
             loginRow.add(loginState);
-            c.gridx = 1;
-            c.gridy = 4;
+            c.gridx = 0;
+            c.gridy = 3;
+            c.gridwidth = 2;
+            c.weightx = 1;
+            c.fill = GridBagConstraints.HORIZONTAL;
+            c.anchor = GridBagConstraints.WEST;
             top.add(loginRow, c);
+            c.gridwidth = 1;
+            c.anchor = GridBagConstraints.CENTER;
 
             JPanel projectRow = new JPanel(new BorderLayout(6, 0));
             SolidButton refreshProjects = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
             refreshProjects.addActionListener(event -> loadProjects(true));
             projectRow.add(projectBox, BorderLayout.CENTER);
             projectRow.add(refreshProjects, BorderLayout.EAST);
-            addRow(top, c, 5, "项目", projectRow);
+            addRow(top, c, 4, "项目", projectRow);
 
             memberBox.setEditable(true);
             memberBox.setMaximumRowCount(12);
+            memberWrap.removeAll();
+            memberWrap.setOpaque(false);
             memberWrap.add(memberBox, BorderLayout.CENTER);
             SolidButton refreshMembers = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
             refreshMembers.addActionListener(event -> loadMembers(true));
             memberWrap.add(refreshMembers, BorderLayout.EAST);
-            addRow(top, c, 6, "成员", memberWrap);
+            addRow(top, c, 5, "成员", memberWrap);
 
             JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
             filters.setOpaque(false);
@@ -245,8 +251,32 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             addFilter(filters, "unresolved", "未解决");
             addFilter(filters, "resolved", "已解决");
             addFilter(filters, "closed", "已关闭");
-            addRow(top, c, 7, "分类", filters);
+            addRow(top, c, 6, "分类", filters);
             return top;
+        }
+
+        private JPanel buildCredentialRow() {
+            JPanel row = new JPanel(new GridBagLayout());
+            row.setOpaque(false);
+            GridBagConstraints cc = new GridBagConstraints();
+            cc.insets = JBUI.insets(0, 0, 0, 8);
+            cc.gridy = 0;
+            cc.gridx = 0;
+            cc.weightx = 0;
+            row.add(new JLabel("账号"), cc);
+            cc.gridx = 1;
+            cc.weightx = 1;
+            cc.fill = GridBagConstraints.HORIZONTAL;
+            row.add(accountField, cc);
+            cc.gridx = 2;
+            cc.weightx = 0;
+            cc.fill = GridBagConstraints.NONE;
+            row.add(new JLabel("密码"), cc);
+            cc.gridx = 3;
+            cc.weightx = 1;
+            cc.fill = GridBagConstraints.HORIZONTAL;
+            row.add(passwordField, cc);
+            return row;
         }
 
         private void cleanupImageCacheOncePerDay() {
@@ -275,22 +305,16 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             JPanel center = new JPanel(new BorderLayout(8, 8));
             center.setOpaque(true);
             center.setBackground(PANEL_BG);
-            JPanel bar = new JPanel(new BorderLayout(8, 0));
+            JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
             bar.setOpaque(true);
             bar.setBackground(TOOLBAR_BG);
             bar.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(8, 10)));
-            JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-            actions.setOpaque(false);
-            actions.add(refreshButton);
-            actions.add(aiFixAllButton);
-            actions.add(clearImageCacheButton);
+            bar.add(refreshButton);
+            bar.add(aiFixAllButton);
+            bar.add(clearImageCacheButton);
             aiEngineBox.setPrototypeDisplayValue("Claude Code");
             aiEngineBox.setEnabled(true);
-            actions.add(aiEngineBox);
-            bar.add(bugCountLabel, BorderLayout.WEST);
-            bugCountLabel.setForeground(TEXT_MAIN);
-            bugCountLabel.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 14));
-            bar.add(actions, BorderLayout.EAST);
+            bar.add(aiEngineBox);
             center.add(bar, BorderLayout.NORTH);
             bugListPanel.setLayout(new javax.swing.BoxLayout(bugListPanel, javax.swing.BoxLayout.Y_AXIS));
             bugListPanel.setOpaque(true);
@@ -384,10 +408,20 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             c.gridy = y;
             c.gridx = 0;
             c.weightx = 0;
+            c.anchor = GridBagConstraints.WEST;
             panel.add(new JLabel(label), c);
             c.gridx = 1;
             c.weightx = 1;
+            c.fill = GridBagConstraints.HORIZONTAL;
             panel.add(component, c);
+        }
+
+        private static String normalizeServerUrl(String value) {
+            if (value == null || value.isBlank()) {
+                return DEFAULT_SERVER;
+            }
+            String trimmed = value.trim();
+            return trimmed.endsWith("/") ? trimmed : trimmed + "/";
         }
 
         private void addFilter(JPanel filters, String key, String text) {
@@ -770,7 +804,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void applySettingsDefaults() {
             PropertiesComponent properties = PropertiesComponent.getInstance();
-            serverField.setText(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER));
+            serverField.setText(normalizeServerUrl(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER)));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
         }
@@ -918,7 +952,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private void restorePreferences() {
             PropertiesComponent properties = projectProperties();
             if (properties == null) return;
-            serverField.setText(properties.getValue("zentao.idea.serverUrl", DEFAULT_SERVER));
+            serverField.setText(normalizeServerUrl(properties.getValue("zentao.idea.serverUrl", DEFAULT_SERVER)));
             accountField.setText(properties.getValue("zentao.idea.account", ""));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
@@ -1006,7 +1040,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             if (bugs.isEmpty()) {
                 bugListPanel.add(emptyState("暂无 Bug，请先登录或刷新。"));
             } else if (filtered.isEmpty()) {
-                bugListPanel.add(emptyState("当前成员或分类暂无 Bug。原始 " + bugs.size() + " 个，成员过滤后 " + memberFiltered.size() + " 个。"));
+                bugListPanel.add(emptyState("当前筛选条件下暂无 Bug（共 " + bugs.size() + " 个）。"));
             } else {
                 for (BugSummary bug : filtered.subList(start, end)) {
                     BugCard card = new BugCard(bug);
@@ -1015,8 +1049,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     bugListPanel.add(javax.swing.Box.createVerticalStrut(8));
                 }
             }
-            bugCountLabel.setText("共 " + filtered.size() + " 个 Bug / 总 " + bugs.size() + " 个");
-            setStatus("Bug 原始 " + bugs.size() + " 个，成员过滤 " + memberFiltered.size() + " 个，当前显示 " + filtered.size() + " 个。");
+            setStatus(buildBugStatusSummary(filtered));
             pageLabel.setText(currentPage + "/" + totalPages);
             int aiFixCount = unresolved(filtered).size();
             aiFixAllButton.setText(aiFixCount > 0 ? "AI一键修复 " + aiFixCount : "AI一键修复");
@@ -1027,6 +1060,18 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private List<BugSummary> filteredBugs() {
             return filterBugsByCategory(filterBugsBySelectedMember());
+        }
+
+        private String buildBugStatusSummary(List<BugSummary> filtered) {
+            int total = bugs.size();
+            int shown = filtered.size();
+            if (total == 0) {
+                return "共 0 个 Bug";
+            }
+            if (shown == total) {
+                return "共 " + total + " 个 Bug";
+            }
+            return "显示 " + shown + " / " + total + " 个 Bug";
         }
 
         private List<BugSummary> filterBugsByCategory(List<BugSummary> scopedBugs) {
@@ -2872,7 +2917,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private String get(String path, Map<String, String> params, boolean ajax) throws Exception {
-                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(HTTP_REQUEST_TIMEOUT).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
+                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(HTTP_REQUEST_TIMEOUT).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
                 if (ajax) builder.header("X-Requested-With", "XMLHttpRequest");
                 addCookieHeader(builder);
                 HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -3291,7 +3336,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
                         .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
-                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1")
                         .header("Accept", "image/*");
                 addCookieHeader(builder);
                 HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
@@ -3314,7 +3359,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
                         .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
-                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.0")
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1")
                         .header("Accept", "image/*,*/*;q=0.8");
                 addCookieHeader(builder);
                 HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());

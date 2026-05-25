@@ -60,6 +60,46 @@ button:disabled {
   gap: 8px;
 }
 
+.field-row {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field-row input {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  color: var(--vscode-input-foreground);
+  font: inherit;
+  padding: 4px 8px;
+  width: 100%;
+}
+
+.credential-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.credential-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.credential-input {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  color: var(--vscode-input-foreground);
+  flex: 1 1 72px;
+  font: inherit;
+  min-width: 72px;
+  padding: 4px 8px;
+}
+
 .auto-login {
   align-items: center;
   display: inline-flex;
@@ -73,7 +113,7 @@ button:disabled {
 }
 
 .bug-actions {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .ai-fix-group {
@@ -128,64 +168,100 @@ button:disabled {
   margin-top: 12px;
 }
 
-.filters label {
-  display: grid;
-  gap: 4px;
+.filter-field-row {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.filter-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .project-row,
 .member-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
   gap: 6px;
-}
-
-.assignee-filter-row {
-  align-items: end;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: 1fr;
-}
-
-.assignee-filter-row.has-member {
-  grid-template-columns: minmax(130px, 0.8fr) minmax(180px, 1.2fr);
-}
-
-.member-field {
   min-width: 0;
 }
 
-@media (max-width: 360px) {
-  .assignee-filter-row {
-    grid-template-columns: 1fr;
-  }
+.project-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 0;
+}
+
+.member-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+}
+
+.member-picker input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.project-row button,
+.member-row button {
+  flex: 0 0 auto;
+}
+
+.member-dropdown {
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  left: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 2px);
+  z-index: 100;
+}
+
+.member-dropdown-item {
+  cursor: pointer;
+  font-size: 12px;
+  overflow: hidden;
+  padding: 4px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-dropdown-item:hover,
+.member-dropdown-item.active {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-list-hoverForeground, inherit);
 }
 
 select,
 input {
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border);
+  box-sizing: border-box;
   color: var(--vscode-input-foreground);
   padding: 4px;
-}
-
-#status {
-  color: var(--vscode-descriptionForeground);
-  margin: 12px 0;
 }
 
 .bug-bar {
   align-items: center;
   border-bottom: 1px solid var(--vscode-panel-border);
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   margin-bottom: 12px;
   padding-bottom: 8px;
 }
 
-#bugCount {
+#status {
   color: var(--vscode-descriptionForeground);
+  margin: 12px 0 8px;
 }
 
 .bug-category-filters {

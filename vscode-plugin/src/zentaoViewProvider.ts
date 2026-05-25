@@ -8,6 +8,9 @@ import {
   type BugWorkflowAction,
   type BugWorkflowRequest,
   LoginExpiredError,
+  DEFAULT_ZENTAO_SERVER_URL,
+  resolveServerUrl,
+  describeErrorChain,
   ZenTaoClient,
   type ZenTaoBugDetail,
   type ZenTaoBugSummary,
@@ -19,6 +22,8 @@ import {
 interface ViewState {
   loggedIn: boolean;
   account?: string;
+  loginAccount: string;
+  serverUrl: string;
   bugs: ZenTaoBugSummary[];
   projects: ZenTaoProject[];
   selectedProjectId?: string;
@@ -30,21 +35,26 @@ interface ViewState {
   selectedIds: string[];
   aiEngine: AiEngine;
   autoLoginEnabled: boolean;
+  hasSavedPassword: boolean;
   status: string;
   loading: boolean;
 }
 
 export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "zentaoBugAssistant.view";
+  static readonly savedPasswordMask = "********";
   private static readonly suppressErrorPopupKey = "zentao.suppressErrorPopup";
 
   private view?: vscode.WebviewView;
   private client?: ZenTaoClient;
   private previewPanel?: vscode.WebviewPanel;
   private keepAliveTimer?: ReturnType<typeof setInterval>;
+  private membersLoadedForProjectId?: string;
   private state: ViewState = {
     loggedIn: false,
     account: undefined,
+    loginAccount: "",
+    serverUrl: "",
     bugs: [],
     projects: [],
     selectedProjectId: undefined,
@@ -56,6 +66,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     selectedIds: [],
     aiEngine: "claudeCode",
     autoLoginEnabled: true,
+    hasSavedPassword: false,
     status: "就绪",
     loading: false
   };
@@ -71,6 +82,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 
   async activateAutoLogin(): Promise<void> {
     this.restorePreferences();
+    await this.restoreLoginFields();
     if (!this.state.autoLoginEnabled) {
       this.postState();
       return;
@@ -88,6 +100,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     webviewView.webview.html = this.renderHtml(webviewView.webview);
     webviewView.webview.onDidReceiveMessage((message) => this.handleMessage(message));
     this.restorePreferences();
+    void this.restoreLoginFields();
     void this.restoreClient();
     this.postState();
     void this.refreshOnViewOpen();
@@ -119,31 +132,22 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     await this.context.globalState.update("zentaoBugAssistant.lastImageCacheCleanup", today);
   }
 
-  async login(): Promise<void> {
-    const savedAccount = await this.context.secrets.get("zentao.account");
-    const account = await vscode.window.showInputBox({
-      prompt: "禅道用户名",
-      value: savedAccount,
-      ignoreFocusOut: true
-    });
-    if (!account) {
-      return;
-    }
-
-    const password = await vscode.window.showInputBox({
-      prompt: "禅道密码",
-      password: true,
-      ignoreFocusOut: true
-    });
-    if (!password) {
+  async login(credentials?: { account?: string; password?: string }): Promise<void> {
+    const account = credentials?.account?.trim() || this.state.loginAccount.trim();
+    const password = await this.resolveLoginPassword(credentials?.password ?? "");
+    if (!account || !password) {
+      this.state.status = "请输入禅道账号和密码";
+      this.postState();
       return;
     }
 
     await this.run("正在登录禅道...", async () => {
+      this.state.loginAccount = account;
       this.client = new ZenTaoClient({ baseUrl: this.serverUrl });
       const session = await this.client.login({ account, password });
       this.state.loggedIn = true;
       this.state.account = session.account;
+      this.state.hasSavedPassword = true;
       this.state.status = `已登录：${session.account}`;
       await this.context.secrets.store("zentao.session", JSON.stringify(session));
       await this.context.secrets.store("zentao.account", account);
@@ -168,26 +172,30 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
 
     await this.run("正在获取 Bug 列表...", async () => {
-      if (!this.state.projects.length) {
-        this.updateStatus("正在加载项目列表...");
-        await this.loadProjects(false);
-      }
-      this.updateStatus(`正在拉取 Bug 列表（项目：${this.state.selectedProjectId ?? "全部"}）...`);
-      const bugs = await this.withAutoLoginRetry(() => this.client!.listBugs({
-        projectId: this.state.selectedProjectId,
-        assigneeScope: "all",
-        teamMembers: []
-      }));
-      this.updateStatus(`已拉取 ${bugs.length} 个 Bug，正在补全附件状态...`);
-      this.state.bugs = await this.withAutoLoginRetry(() => this.client!.enrichVideoFlags(bugs));
-      this.state.selectedIds = [];
-      this.state.status = `共 ${this.state.bugs.length} 个 Bug`;
-      if (!this.state.bugs.length) {
-        this.updateStatus("未拉取到 Bug，正在自动诊断入口权限...");
-        await this.crawlCurrentBugAccess();
-        this.updateStatus("未发现 Bug，请先登录/刷新或检查筛选条件。");
-      }
+      await this.fetchBugList();
     });
+  }
+
+  private async fetchBugList(): Promise<void> {
+    if (!this.state.projects.length) {
+      this.updateStatus("正在加载项目列表...");
+      await this.loadProjects(false);
+    }
+    this.updateStatus(`正在拉取 Bug 列表（项目：${this.state.selectedProjectId ?? "全部"}）...`);
+    const bugs = await this.withAutoLoginRetry(() => this.client!.listBugs({
+      projectId: this.state.selectedProjectId,
+      assigneeScope: "all",
+      teamMembers: []
+    }));
+    this.updateStatus(`已拉取 ${bugs.length} 个 Bug，正在补全附件状态...`);
+    this.state.bugs = await this.withAutoLoginRetry(() => this.client!.enrichVideoFlags(bugs));
+    this.state.selectedIds = [];
+    this.state.status = `共 ${this.state.bugs.length} 个 Bug`;
+    if (!this.state.bugs.length) {
+      this.updateStatus("未拉取到 Bug，正在自动诊断入口权限...");
+      await this.crawlCurrentBugAccess();
+      this.updateStatus("未发现 Bug，请先登录/刷新或检查筛选条件。");
+    }
   }
 
   async crawlCurrentBugAccess(): Promise<void> {
@@ -241,12 +249,14 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       return;
     }
 
-    if (this.state.members.length && !forceRefresh) {
+    const projectId = this.state.selectedProjectId;
+    if (!forceRefresh && this.state.members.length && this.membersLoadedForProjectId === projectId) {
       this.reconcileSelectedMember();
       return;
     }
 
-    this.state.members = await this.withAutoLoginRetry(() => this.client!.listMembers(this.state.selectedProjectId));
+    this.state.members = await this.withAutoLoginRetry(() => this.client!.listMembers(projectId));
+    this.membersLoadedForProjectId = projectId;
     this.reconcileSelectedMember();
     await this.savePreferences();
   }
@@ -544,10 +554,14 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     bugCategoryFilters?: string[];
     aiEngine?: AiEngine;
     autoLoginEnabled?: boolean;
+    serverUrl?: string;
+    loginAccount?: string;
+    account?: string;
+    password?: string;
     action?: BugWorkflowAction;
   }): Promise<void> {
     if (message.type === "login") {
-      await this.login();
+      await this.login({ account: message.account, password: message.password });
     }
     if (message.type === "refresh") {
       await this.refresh();
@@ -563,8 +577,20 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.selectedProjectId = message.projectId || undefined;
       this.state.bugs = [];
       this.state.selectedIds = [];
+      this.state.assignee = undefined;
+      this.state.members = [];
+      this.membersLoadedForProjectId = undefined;
       await this.savePreferences();
-      await this.refresh();
+      if (!(await this.ensureAuthenticated())) {
+        this.postState();
+        return;
+      }
+      await this.run("正在切换项目...", async () => {
+        this.updateStatus("正在加载成员列表...");
+        await this.loadMembers(true);
+        this.updateStatus(`成员列表已加载：${this.state.members.length} 个成员，正在刷新 Bug 列表...`);
+        await this.fetchBugList();
+      });
     }
     if (message.type === "refreshProjects") {
       await this.refreshProjects();
@@ -589,6 +615,14 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     if (message.type === "setAutoLogin") {
       this.state.autoLoginEnabled = Boolean(message.autoLoginEnabled);
       await this.config.update("autoLogin", this.state.autoLoginEnabled, vscode.ConfigurationTarget.Global);
+      this.postState();
+    }
+    if (message.type === "setServerUrl") {
+      await this.updateServerUrl(message.serverUrl ?? "");
+    }
+    if (message.type === "setLoginAccount") {
+      this.state.loginAccount = message.loginAccount?.trim() ?? "";
+      await this.context.secrets.store("zentao.account", this.state.loginAccount);
       this.postState();
     }
     if (message.type === "setAiEngine") {
@@ -718,7 +752,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.postState();
       await action();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = describeErrorChain(error);
       this.state.status = "失败：操作未完成，请查看弹窗详情";
       if (!this.context.globalState.get<boolean>(ZenTaoBugAssistantViewProvider.suppressErrorPopupKey, false)) {
         const brief = briefErrorMessage(message);
@@ -856,6 +890,21 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
   }
 
+  private async restoreLoginFields(): Promise<void> {
+    this.state.loginAccount = (await this.context.secrets.get("zentao.account")) ?? "";
+    const savedPassword = await this.context.secrets.get("zentao.password");
+    this.state.hasSavedPassword = Boolean(savedPassword);
+    this.postState();
+  }
+
+  private async resolveLoginPassword(inputPassword: string): Promise<string | undefined> {
+    const trimmed = inputPassword.trim();
+    if (!trimmed || trimmed === ZenTaoBugAssistantViewProvider.savedPasswordMask) {
+      return (await this.context.secrets.get("zentao.password")) ?? undefined;
+    }
+    return trimmed;
+  }
+
   private restorePreferences(): void {
     this.state.selectedProjectId = this.context.globalState.get<string>("zentao.selectedProjectId");
     this.state.projects = normalizeProjects(this.context.globalState.get<ZenTaoProject[]>("zentao.projects"));
@@ -868,6 +917,28 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     this.state.bugCategoryFilters = normalizeBugCategoryFilters(this.context.globalState.get<string[]>("zentao.bugCategoryFilters"));
     this.state.aiEngine = normalizeAiEngine(this.config.get<AiEngine>("aiEngine"));
     this.state.autoLoginEnabled = this.config.get<boolean>("autoLogin") ?? true;
+    this.state.serverUrl = this.config.get<string>("serverUrl") ?? "";
+    if (!this.state.serverUrl.trim() || resolveServerUrl(this.state.serverUrl) === DEFAULT_ZENTAO_SERVER_URL) {
+      this.state.serverUrl = DEFAULT_ZENTAO_SERVER_URL;
+    }
+  }
+
+  private async updateServerUrl(raw: string): Promise<void> {
+    const trimmed = raw.trim();
+    const previousResolved = this.serverUrl;
+    await this.config.update("serverUrl", trimmed, vscode.ConfigurationTarget.Global);
+    this.state.serverUrl = trimmed;
+    const nextResolved = this.serverUrl;
+    if (previousResolved !== nextResolved) {
+      this.client = undefined;
+      await this.clearSessionState();
+      this.state.bugs = [];
+      this.state.selectedIds = [];
+      this.state.projects = [];
+      this.state.members = [];
+    }
+    this.state.status = `禅道地址：${nextResolved}`;
+    this.postState();
   }
 
   private async savePreferences(): Promise<void> {
@@ -880,7 +951,13 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   }
 
   private postState(): void {
-    this.view?.webview.postMessage({ type: "state", state: this.state });
+    this.view?.webview.postMessage({
+      type: "state",
+      state: {
+        ...this.state,
+        serverUrl: resolveServerUrl(this.state.serverUrl || this.config.get<string>("serverUrl"))
+      }
+    });
   }
 
   private renderHtml(webview: vscode.Webview): string {
@@ -901,34 +978,46 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
 <body>
   <header>
     <img class="header-logo" src="${headerLogoUri}" alt="云禅道" />
+    <label class="field-row">禅道地址
+      <input id="serverUrl" type="url" value="http://zentao.yuwan-game.com:8088/" placeholder="http://zentao.yuwan-game.com:8088/" />
+    </label>
+    <div class="credential-row">
+      <span class="credential-label">禅道账号</span>
+      <input id="account" class="credential-input" type="text" autocomplete="username" />
+      <span class="credential-label">禅道密码</span>
+      <input id="password" class="credential-input" type="password" autocomplete="current-password" />
+    </div>
     <div class="login-row">
-      <label class="auto-login">
+      <label class="auto-login" hidden>
         <input id="autoLogin" type="checkbox" />
         <span>自动登录</span>
       </label>
       <button id="login">登录</button>
-      <div id="loginState" class="login-state logged-out">未登录</div>
+      <div id="loginState" class="login-state logged-in" hidden>已登录</div>
     </div>
   </header>
   <section class="filters">
-    <label>项目
+    <div class="filter-field-row">
+      <span class="filter-label">项目</span>
       <div class="project-row">
         <select id="project"></select>
         <button id="refreshProjects" title="重新抓取项目列表">刷新</button>
       </div>
-    </label>
-    <label class="member-field">成员
+    </div>
+    <div class="filter-field-row">
+      <span class="filter-label">成员</span>
       <div class="member-row">
-        <input id="assignee" list="assigneeOptions" placeholder="搜索成员姓名或账号，留空显示全部成员" />
-        <datalist id="assigneeOptions"></datalist>
+        <div class="member-picker">
+          <input id="assignee" type="text" placeholder="留空显示全部成员" autocomplete="off" />
+          <div id="memberDropdown" class="member-dropdown" hidden></div>
+        </div>
         <button id="refreshMembers" title="重新抓取成员列表">刷新</button>
       </div>
-    </label>
+    </div>
   </section>
   <section id="status">就绪</section>
   <section id="bugCategoryFilters" class="bug-category-filters" aria-label="Bug 分类"></section>
   <section class="bug-bar">
-    <span id="bugCount">共 0 个 Bug</span>
     <div class="bug-actions">
       <button id="refresh">刷新</button>
       <div class="ai-fix-group">
@@ -953,7 +1042,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   }
 
   private get serverUrl(): string {
-    return this.config.get<string>("serverUrl") ?? "http://zentao.yuwan-game.com:8088/";
+    return resolveServerUrl(this.state.serverUrl || this.config.get<string>("serverUrl"));
   }
 
   private get aiEngine(): AiEngine {

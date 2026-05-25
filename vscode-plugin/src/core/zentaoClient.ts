@@ -15,6 +15,12 @@ import * as fs from "fs/promises";
 import * as path from "path";
 
 const defaultTimeoutMs = 10_000;
+export const DEFAULT_ZENTAO_SERVER_URL = "http://zentao.yuwan-game.com:8088/";
+const PLACEHOLDER_SERVER_URLS = new Set([
+  "",
+  "http://your-zentao-server/",
+  "http://your-zentao-server"
+]);
 const debugEndpoint = "http://127.0.0.1:7837/ingest/16d23de6-52c7-4de0-86a3-b3263b8c05ca";
 const debugSessionId = "4538d4";
 
@@ -140,17 +146,41 @@ export class ZenTaoClient {
 
   async listMembers(projectId?: string): Promise<ZenTaoMember[]> {
     this.ensureSession();
-    const params = buildBugBrowseParams(projectId);
-    const memberRequestParams = memberSourceParams(params);
-    const pages = await Promise.all(memberRequestParams.map((requestParams) => this.getText("index.php", requestParams, false)));
-    const members = dedupeMembers(pages.flatMap((html) => parseMemberList(html)));
+    const selectNames = projectId
+      ? ["assignedTo", "assignedTo[]"]
+      : ["assignedTo", "assignedTo[]", "openedBy", "resolvedBy", "closedBy", "confirmedBy", "lastEditedBy"];
+    const result = new Map<string, ZenTaoMember>();
+    const sources = memberSources(projectId);
+    const pages = await Promise.all(sources.map((source) => this.getText(source.path, source.params, source.ajax)));
+
+    for (const html of pages) {
+      for (const member of parseMembersFromSelects(html, selectNames)) {
+        result.set(member.account, member);
+      }
+      for (const member of parseMembersFromTeamTable(html)) {
+        result.set(member.account, member);
+      }
+    }
+
+    if (projectId) {
+      const bugs = await this.listBugs({ projectId, assigneeScope: "all", teamMembers: [] });
+      for (const bug of bugs) {
+        const account = bug.assignedTo?.trim();
+        if (account && !isIgnoredMember(account, account)) {
+          if (!result.has(account)) {
+            result.set(account, { account, name: account });
+          }
+        }
+      }
+    }
+
+    const members = dedupeMembers([...result.values()]);
     // #region agent log
     debugLog("M1,M2,M3", "vscode-plugin/src/core/zentaoClient.ts:139", "member list parsed", {
       projectId,
-      requestParams: memberRequestParams.map(redactParams),
+      sourceCount: sources.length,
       memberCount: members.length,
-      sampleAccounts: members.slice(0, 8).map((member) => member.account),
-      summaries: pages.map(summarizeMemberHtml)
+      sampleAccounts: members.slice(0, 8).map((member) => member.account)
     });
     // #endregion
     return members;
@@ -633,15 +663,15 @@ export class ZenTaoClient {
   ): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const url = this.buildUrl(path, init.params);
     try {
-      const url = this.buildUrl(path, init.params);
       const { params: _params, ajax: _ajax, ...fetchInit } = init;
       const sentCookieHeader = this.cookieHeader;
       const response = await fetch(url, {
         ...fetchInit,
         signal: controller.signal,
         headers: {
-          "User-Agent": "ZenTaoBugAssistant/1.0.0",
+          "User-Agent": "ZenTaoBugAssistant/1.0.1",
           Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
           ...(init.ajax === false ? {} : { "X-Requested-With": "XMLHttpRequest" }),
           ...this.authHeaders(),
@@ -671,6 +701,8 @@ export class ZenTaoClient {
       });
       // #endregion
       return response;
+    } catch (error) {
+      throw formatZenTaoRequestError(url.toString(), error, this.timeoutMs);
     } finally {
       clearTimeout(timeout);
     }
@@ -764,6 +796,53 @@ function bugDiagnosticParams(baseParams: Record<string, string>): Array<Record<s
     { ...baseParams, browseType: "assigntome" },
     { ...baseParams, browseType: "all", param: "0", orderBy: "id_desc" }
   ]);
+}
+
+function memberSources(projectId?: string): Array<{ path: string; params: Record<string, string>; ajax: boolean }> {
+  const sources: Array<{ path: string; params: Record<string, string>; ajax: boolean }> = [];
+  for (const params of bugBrowseParamSets(projectId)) {
+    sources.push({ path: "index.php", params, ajax: false });
+    if (params.productID) {
+      sources.push({
+        path: "index.php",
+        params: { ...withLowercaseProductId(params), branch: "all", browseType: "unresolved" },
+        ajax: false
+      });
+    }
+  }
+  if (projectId) {
+    sources.push(
+      { path: "index.php", params: { m: "bug", f: "create", productID: projectId }, ajax: false },
+      { path: "index.php", params: { m: "bug", f: "create", productID: projectId, branch: "0", moduleID: "0" }, ajax: false },
+      { path: "index.php", params: { m: "product", f: "team", productID: projectId }, ajax: false },
+      { path: "index.php", params: { m: "project", f: "team", projectID: projectId }, ajax: false },
+      { path: "index.php", params: { m: "execution", f: "team", executionID: projectId }, ajax: false }
+    );
+  }
+  return dedupeMemberSources(sources);
+}
+
+function bugBrowseParamSets(projectId?: string, assignee?: string): Array<Record<string, string>> {
+  const base = buildBugBrowseParams(projectId, assignee);
+  const result = [base];
+  for (const browseType of ["bySearch", "all", "unclosed", "assigntome"]) {
+    result.push({ ...base, browseType });
+  }
+  return result;
+}
+
+function dedupeMemberSources(
+  values: Array<{ path: string; params: Record<string, string>; ajax: boolean }>
+): Array<{ path: string; params: Record<string, string>; ajax: boolean }> {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = `${value.path}?${JSON.stringify(Object.entries(value.params).sort(([left], [right]) => left.localeCompare(right)))}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function memberSourceParams(baseParams: Record<string, string>): Array<Record<string, string>> {
@@ -1000,6 +1079,45 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 }
 
+export function resolveServerUrl(configured?: string | null): string {
+  const value = configured?.trim() ?? "";
+  if (!value || PLACEHOLDER_SERVER_URLS.has(value) || PLACEHOLDER_SERVER_URLS.has(normalizeBaseUrl(value))) {
+    return DEFAULT_ZENTAO_SERVER_URL;
+  }
+  return normalizeBaseUrl(value);
+}
+
+export function describeErrorChain(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const messages: string[] = [];
+  let current: unknown = error;
+  while (current instanceof Error) {
+    if (current.message && !messages.includes(current.message)) {
+      messages.push(current.message);
+    }
+    current = current.cause;
+  }
+  return messages.join("；") || "未知错误";
+}
+
+function formatZenTaoRequestError(url: string, error: unknown, timeoutMs: number): Error {
+  if (error instanceof Error && error.name === "AbortError") {
+    return new Error(`连接禅道超时（${Math.round(timeoutMs / 1000)} 秒）：${url}`);
+  }
+  const detail = describeErrorChain(error);
+  if (/fetch failed/i.test(detail)) {
+    return new Error(
+      `无法连接禅道服务器 ${url}。请检查服务器地址、VPN/内网连接和防火墙。底层错误：${detail}`
+    );
+  }
+  if (error instanceof Error && /禅道/.test(error.message)) {
+    return error;
+  }
+  return new Error(`禅道请求失败（${url}）：${detail}`);
+}
+
 function formatZenTaoDate(value: Date): string {
   const pad = (item: number) => String(item).padStart(2, "0");
   return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
@@ -1202,12 +1320,59 @@ function parseMemberOptions(selectHtml: string): ZenTaoMember[] {
     .map((option) => {
       const account = decodeHtmlAttr(readAttr(option, "value") ?? "").trim();
       const name = htmlText(option).trim();
-      if (!account || !name || /^(all|0|closed|ditto)$/i.test(account) || /^(全部|所有|选择|空|无|closed)$/i.test(name)) {
+      if (!account || !name || isIgnoredMember(account, name)) {
         return undefined;
       }
       return { account, name: name === account ? account : `${name} (${account})` };
     })
     .filter((member): member is ZenTaoMember => Boolean(member));
+}
+
+function isIgnoredMember(account: string, name: string): boolean {
+  return /^(all|0|closed|ditto|admin|guest)$/i.test(account) || /^(全部|所有|选择|空|无|closed)$/i.test(name);
+}
+
+function readUserAccount(html: string): string {
+  const href = readAttr(html, "href") ?? "";
+  for (const name of ["account", "userID", "assignedTo"]) {
+    const match = href.match(new RegExp(`[?&]${name}=([^&#]+)`, "i"));
+    if (match?.[1]) {
+      return decodeURIComponent(match[1]);
+    }
+  }
+  for (const name of ["data-account", "data-user", "data-id", "data-value"]) {
+    const value = readAttr(html, name)?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  const text = htmlText(html).trim();
+  return /^[A-Za-z][A-Za-z0-9_.-]{1,40}$/.test(text) ? text : "";
+}
+
+function parseMembersFromTeamTable(html: string): ZenTaoMember[] {
+  const result = new Map<string, ZenTaoMember>();
+  for (const row of matchAll(html, /<tr\b[\s\S]*?<\/tr>/gi)) {
+    const text = htmlText(row);
+    if (!/(账号|用户名|真实姓名|成员|realname|account)/i.test(text) && !matchAll(row, /<td\b[\s\S]*?<\/td>/gi).length) {
+      continue;
+    }
+    for (const link of matchAll(row, /<a\b[^>]*>[\s\S]*?<\/a>/gi)) {
+      const account = readUserAccount(link);
+      const name = htmlText(link).trim();
+      if (account && name && !isIgnoredMember(account, name)) {
+        result.set(account, { account, name: name === account ? account : `${name} (${account})` });
+      }
+    }
+    for (const cell of matchAll(row, /<td\b[\s\S]*?<\/td>/gi).map(htmlText)) {
+      if (/^[A-Za-z][A-Za-z0-9_.-]{1,40}$/.test(cell) && !isIgnoredMember(cell, cell)) {
+        if (!result.has(cell)) {
+          result.set(cell, { account: cell, name: cell });
+        }
+      }
+    }
+  }
+  return [...result.values()];
 }
 
 function parseAssignedMembersFromBugRows(html: string): ZenTaoMember[] {

@@ -2,7 +2,7 @@
   "name": "zentao-bug-assistant-vscode",
   "displayName": "ZenTao Bug Assistant",
   "description": "Fetch assigned ZenTao bugs and send fix prompts to Cursor or Claude Code.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "kibernet",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -114,8 +114,8 @@
       "properties": {
         "zentaoBugAssistant.serverUrl": {
           "type": "string",
-          "default": "http://your-zentao-server/",
-          "description": "禅道服务器地址，例如 http://zentao.example.com:8080/。"
+          "default": "http://zentao.yuwan-game.com:8088/",
+          "description": "禅道服务器地址，安装后默认填入公司禅道地址，可按需修改。"
         },
         "zentaoBugAssistant.aiEngine": {
           "type": "string",

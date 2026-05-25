@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.zentao.bugassistant</id>
     <name>ZenTao Bug Assistant</name>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <vendor>Kibernet</vendor>
 
     <description><![CDATA[
@@ -27,6 +27,12 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>1.0.1</h3>
+        <ul>
+            <li>修复 Marketplace 兼容性警告（废弃 API）</li>
+            <li>优化登录界面：账号与密码同一行显示</li>
+            <li>默认禅道地址预填为 http://zentao.yuwan-game.com:8088/</li>
+        </ul>
         <h3>1.0.0</h3>
         <ul>
             <li>首次发布</li>

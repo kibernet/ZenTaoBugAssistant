@@ -20,7 +20,7 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
     private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
 
     private JPanel panel;
-    private JBTextField serverField;
+    private JBTextField serverField = new JBTextField(DEFAULT_SERVER);
     private JCheckBox autoLoginBox;
     private ComboBox<String> aiEngineBox;
     private JSpinner keepAliveSpinner;
@@ -32,7 +32,7 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
 
     @Override
     public @Nullable JComponent createComponent() {
-        serverField = new JBTextField();
+        serverField = new JBTextField(DEFAULT_SERVER);
         autoLoginBox = new JCheckBox("启动后自动登录");
         aiEngineBox = new ComboBox<>(new String[] {"Claude Code"});
         keepAliveSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 120, 1));
@@ -84,9 +84,17 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
     @Override
     public void reset() {
         PropertiesComponent properties = PropertiesComponent.getInstance();
-        serverField.setText(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER));
+        serverField.setText(normalizeSettingsServerUrl(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER)));
         autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
         aiEngineBox.setSelectedIndex(0);
         keepAliveSpinner.setValue(properties.getInt("zentao.idea.settings.keepAliveMinutes", 5));
+    }
+
+    private static String normalizeSettingsServerUrl(String value) {
+        if (value == null || value.isBlank()) {
+            return DEFAULT_SERVER;
+        }
+        String trimmed = value.trim();
+        return trimmed.endsWith("/") ? trimmed : trimmed + "/";
     }
 }
