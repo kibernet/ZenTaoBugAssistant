@@ -50,7 +50,6 @@ document.getElementById("project").addEventListener("change", (event) => {
       ...lastState,
       assignee: undefined,
       bugs: [],
-      members: [],
       selectedIds: [],
       selectedProjectId: event.target.value || undefined
     };
@@ -462,7 +461,7 @@ function renderFilters(state) {
     assignee.value = formatSelectedMember(state.assignee, state.members ?? []);
   }
   if (document.activeElement === assignee) {
-    renderMemberDropdown(filterMembers(assignee.value, state.members ?? []));
+    openMemberDropdown(filterMembersForBrowse(assignee.value, state.members ?? []));
   } else {
     hideMemberDropdown();
   }
@@ -471,20 +470,21 @@ function renderFilters(state) {
 function setupMemberPicker() {
   const assignee = document.getElementById("assignee");
   const dropdown = document.getElementById("memberDropdown");
+  const toggle = document.getElementById("memberDropdownToggle");
 
   assignee.addEventListener("focus", () => {
-    renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+    openMemberDropdown(filterMembersForBrowse(assignee.value, lastState?.members ?? []));
   });
   assignee.addEventListener("input", () => {
     memberDropdownActiveIndex = -1;
-    renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+    openMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
   });
   assignee.addEventListener("keydown", (event) => {
     const items = dropdown.querySelectorAll(".member-dropdown-item");
     if (event.key === "ArrowDown") {
       event.preventDefault();
       if (dropdown.hidden && items.length) {
-        renderMemberDropdown(filterMembers(assignee.value, lastState?.members ?? []));
+        openMemberDropdown(filterMembersForBrowse(assignee.value, lastState?.members ?? []));
         return;
       }
       memberDropdownActiveIndex = Math.min(memberDropdownActiveIndex + 1, items.length - 1);
@@ -517,9 +517,45 @@ function setupMemberPicker() {
   dropdown.addEventListener("mousedown", () => {
     memberDropdownMouseDown = true;
   });
+  toggle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    memberDropdownMouseDown = true;
+  });
+  toggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    toggleMemberDropdown();
+  });
   document.addEventListener("mouseup", () => {
     memberDropdownMouseDown = false;
   });
+}
+
+function filterMembersForBrowse(query, members) {
+  const text = String(query ?? "").trim();
+  if (!text) {
+    return members;
+  }
+  if (lastState?.assignee && formatSelectedMember(lastState.assignee, members) === text) {
+    return members;
+  }
+  return filterMembers(text, members);
+}
+
+function toggleMemberDropdown() {
+  const dropdown = document.getElementById("memberDropdown");
+  const assignee = document.getElementById("assignee");
+  if (!dropdown.hidden) {
+    hideMemberDropdown();
+    assignee.focus();
+    return;
+  }
+  assignee.focus();
+  openMemberDropdown(filterMembersForBrowse(assignee.value, lastState?.members ?? []));
+}
+
+function openMemberDropdown(members) {
+  renderMemberDropdown(members);
+  updateMemberDropdownToggle(true);
 }
 
 function filterMembers(query, members) {
@@ -546,6 +582,7 @@ function renderMemberDropdown(members) {
   memberDropdownActiveIndex = -1;
   if (!members.length) {
     dropdown.hidden = true;
+    updateMemberDropdownToggle(false);
     return;
   }
   for (const member of members) {
@@ -560,6 +597,16 @@ function renderMemberDropdown(members) {
     dropdown.appendChild(item);
   }
   dropdown.hidden = false;
+  updateMemberDropdownToggle(true);
+}
+
+function updateMemberDropdownToggle(open) {
+  const toggle = document.getElementById("memberDropdownToggle");
+  if (!toggle) {
+    return;
+  }
+  toggle.classList.toggle("open", open);
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function highlightMemberDropdownItem(items) {
@@ -582,6 +629,7 @@ function hideMemberDropdown() {
   const dropdown = document.getElementById("memberDropdown");
   dropdown.hidden = true;
   memberDropdownActiveIndex = -1;
+  updateMemberDropdownToggle(false);
 }
 
 function clearSelectedMemberFilter() {

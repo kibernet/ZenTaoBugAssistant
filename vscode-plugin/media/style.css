@@ -204,7 +204,39 @@ button:disabled {
 
 .member-picker input {
   box-sizing: border-box;
+  padding-right: 26px;
   width: 100%;
+}
+
+.member-dropdown-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  display: flex;
+  height: calc(100% - 2px);
+  justify-content: center;
+  opacity: 0.85;
+  padding: 0;
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  width: 22px;
+}
+
+.member-dropdown-toggle:hover,
+.member-dropdown-toggle.open {
+  background: var(--vscode-list-hoverBackground);
+  opacity: 1;
+}
+
+.member-dropdown-toggle::before {
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  content: "";
+  margin-top: 2px;
 }
 
 .project-row button,

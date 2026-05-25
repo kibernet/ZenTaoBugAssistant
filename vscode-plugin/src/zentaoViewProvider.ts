@@ -50,6 +50,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
   private previewPanel?: vscode.WebviewPanel;
   private keepAliveTimer?: ReturnType<typeof setInterval>;
   private membersLoadedForProjectId?: string;
+  private membersByProject: Record<string, ZenTaoMember[]> = {};
   private state: ViewState = {
     loggedIn: false,
     account: undefined,
@@ -250,15 +251,34 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     }
 
     const projectId = this.state.selectedProjectId;
-    if (!forceRefresh && this.state.members.length && this.membersLoadedForProjectId === projectId) {
+    const cacheKey = projectCacheKey(projectId);
+    if (!forceRefresh && this.membersLoadedForProjectId === projectId && this.state.members.length) {
       this.reconcileSelectedMember();
+      return;
+    }
+
+    const cached = this.membersByProject[cacheKey];
+    if (!forceRefresh && cached?.length) {
+      this.state.members = [...cached];
+      this.membersLoadedForProjectId = projectId;
+      this.reconcileSelectedMember();
+      await this.savePreferences();
       return;
     }
 
     this.state.members = await this.withAutoLoginRetry(() => this.client!.listMembers(projectId));
     this.membersLoadedForProjectId = projectId;
+    this.membersByProject[cacheKey] = this.state.members;
     this.reconcileSelectedMember();
     await this.savePreferences();
+  }
+
+  private applyMembersCacheForProject(projectId?: string): void {
+    const cacheKey = projectCacheKey(projectId);
+    const cached = this.membersByProject[cacheKey];
+    this.state.members = cached ? [...cached] : [];
+    this.membersLoadedForProjectId = projectId;
+    this.reconcileSelectedMember();
   }
 
   private reconcileSelectedMember(): void {
@@ -578,8 +598,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.bugs = [];
       this.state.selectedIds = [];
       this.state.assignee = undefined;
-      this.state.members = [];
-      this.membersLoadedForProjectId = undefined;
+      this.applyMembersCacheForProject(this.state.selectedProjectId);
       await this.savePreferences();
       if (!(await this.ensureAuthenticated())) {
         this.postState();
@@ -587,7 +606,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       }
       await this.run("正在切换项目...", async () => {
         this.updateStatus("正在加载成员列表...");
-        await this.loadMembers(true);
+        await this.loadMembers(false);
         this.updateStatus(`成员列表已加载：${this.state.members.length} 个成员，正在刷新 Bug 列表...`);
         await this.fetchBugList();
       });
@@ -912,8 +931,16 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
     this.state.assigneeScope = "member";
     this.state.assignee = this.context.globalState.get<string>("zentao.assignee");
     this.state.teamMembers = this.config.get<string[]>("teamMembers") ?? [];
-    this.state.members = normalizeMembers(this.context.globalState.get<ZenTaoMember[]>("zentao.members"));
-    this.reconcileSelectedMember();
+    this.membersByProject = normalizeMembersByProject(this.context.globalState.get<Record<string, ZenTaoMember[]>>("zentao.membersByProject"));
+    const legacyMembers = normalizeMembers(this.context.globalState.get<ZenTaoMember[]>("zentao.members"));
+    const legacyProjectId = this.context.globalState.get<string>("zentao.membersProjectId");
+    if (legacyMembers.length) {
+      const legacyKey = projectCacheKey(legacyProjectId || this.state.selectedProjectId);
+      if (!this.membersByProject[legacyKey]?.length) {
+        this.membersByProject[legacyKey] = legacyMembers;
+      }
+    }
+    this.applyMembersCacheForProject(this.state.selectedProjectId);
     this.state.bugCategoryFilters = normalizeBugCategoryFilters(this.context.globalState.get<string[]>("zentao.bugCategoryFilters"));
     this.state.aiEngine = normalizeAiEngine(this.config.get<AiEngine>("aiEngine"));
     this.state.autoLoginEnabled = this.config.get<boolean>("autoLogin") ?? true;
@@ -936,15 +963,21 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       this.state.selectedIds = [];
       this.state.projects = [];
       this.state.members = [];
+      this.membersByProject = {};
+      this.membersLoadedForProjectId = undefined;
     }
     this.state.status = `禅道地址：${nextResolved}`;
     this.postState();
   }
 
   private async savePreferences(): Promise<void> {
+    const cacheKey = projectCacheKey(this.membersLoadedForProjectId ?? this.state.selectedProjectId);
+    if (this.state.members.length) {
+      this.membersByProject[cacheKey] = this.state.members;
+    }
     await this.context.globalState.update("zentao.selectedProjectId", this.state.selectedProjectId);
     await this.context.globalState.update("zentao.projects", this.state.projects);
-    await this.context.globalState.update("zentao.members", this.state.members);
+    await this.context.globalState.update("zentao.membersByProject", this.membersByProject);
     await this.context.globalState.update("zentao.assigneeScope", this.state.assigneeScope);
     await this.context.globalState.update("zentao.assignee", this.state.assignee);
     await this.context.globalState.update("zentao.bugCategoryFilters", this.state.bugCategoryFilters);
@@ -1009,6 +1042,7 @@ export class ZenTaoBugAssistantViewProvider implements vscode.WebviewViewProvide
       <div class="member-row">
         <div class="member-picker">
           <input id="assignee" type="text" placeholder="留空显示全部成员" autocomplete="off" />
+          <button id="memberDropdownToggle" type="button" class="member-dropdown-toggle" title="展开成员列表" aria-label="展开成员列表" aria-expanded="false" aria-controls="memberDropdown"></button>
           <div id="memberDropdown" class="member-dropdown" hidden></div>
         </div>
         <button id="refreshMembers" title="重新抓取成员列表">刷新</button>
@@ -1207,6 +1241,25 @@ function normalizeMembers(value: ZenTaoMember[] | undefined): ZenTaoMember[] {
       name: typeof member.name === "string" ? member.name : ""
     }))
     .filter((member) => member.account && member.name);
+}
+
+function projectCacheKey(projectId?: string): string {
+  return projectId ?? "";
+}
+
+function normalizeMembersByProject(value: Record<string, ZenTaoMember[]> | undefined): Record<string, ZenTaoMember[]> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const result: Record<string, ZenTaoMember[]> = {};
+  for (const [projectId, members] of Object.entries(value)) {
+    const normalized = normalizeMembers(members);
+    if (normalized.length) {
+      result[projectCacheKey(projectId)] = normalized;
+    }
+  }
+  return result;
 }
 
 function normalizeBugCategoryFilters(value: string[] | undefined): string[] {

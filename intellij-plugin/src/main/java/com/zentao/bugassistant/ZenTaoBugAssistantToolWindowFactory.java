@@ -84,6 +84,8 @@ import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.event.PopupMenuEvent;
+import javax.swing.event.PopupMenuListener;
 import javax.swing.text.JTextComponent;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
@@ -137,6 +139,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final List<BugSummary> bugs = new ArrayList<>();
         private final List<Item> projects = new ArrayList<>();
         private final List<Item> members = new ArrayList<>();
+        private final Map<String, List<Item>> membersByProject = new LinkedHashMap<>();
+        private String membersLoadedForProjectId = "";
         private ZenTaoPreviewVirtualFile previewFile;
         private String preferredProjectId = "";
         private String preferredMemberAccount = "";
@@ -513,6 +517,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (hydratingProjects) return;
                 preferredMemberAccount = "";
                 clearMemberSearchField();
+                applyMembersCacheForProject(selectedProjectId());
                 savePreferences();
                 refreshBugs();
             });
@@ -608,6 +613,24 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (hydratingMembers || programmaticMemberUpdate) return;
                 applyMemberFilterSelection(true);
             });
+            memberBox.addPopupMenuListener(new PopupMenuListener() {
+                @Override
+                public void popupMenuWillBecomeVisible(PopupMenuEvent event) {
+                    if (hydratingMembers || programmaticMemberUpdate) return;
+                    String text = memberSearchEditor().getText().trim();
+                    if (text.isBlank() || isCommittedMemberDisplay(text)) {
+                        repopulateMemberDropdownItems("");
+                    }
+                }
+
+                @Override
+                public void popupMenuWillBecomeInvisible(PopupMenuEvent event) {
+                }
+
+                @Override
+                public void popupMenuCanceled(PopupMenuEvent event) {
+                }
+            });
         }
 
         private void setMemberEditorText(String text) {
@@ -638,7 +661,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             Item matched = findMemberItem(preferredMemberAccount);
             String display = matched != null ? matched.toString() : preferredMemberAccount;
             setMemberEditorText(display);
-            filterMemberDropdown(display);
+            repopulateMemberDropdownItems("");
+        }
+
+        private boolean isCommittedMemberDisplay(String text) {
+            if (text == null || text.isBlank() || preferredMemberAccount.isBlank()) return false;
+            Item matched = findMemberItem(preferredMemberAccount);
+            String display = matched != null ? matched.toString() : preferredMemberAccount;
+            return text.equals(display);
         }
 
         private Item findMemberBySearchText(String raw) {
@@ -675,6 +705,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void filterMemberDropdown(String query, boolean allowPopup) {
+            repopulateMemberDropdownItems(query);
+            String needle = query == null ? "" : query.trim();
+            if (allowPopup && !needle.isBlank() && memberBox.getItemCount() > 0) {
+                SwingUtilities.invokeLater(() -> {
+                    memberSearchEditor().requestFocusInWindow();
+                    memberBox.showPopup();
+                });
+            } else if (!allowPopup) {
+                memberBox.hidePopup();
+            }
+        }
+
+        private void repopulateMemberDropdownItems(String query) {
             String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
             String preserve = memberSearchEditor().getText();
             programmaticMemberUpdate = true;
@@ -693,14 +736,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             } finally {
                 hydratingMembers = false;
                 programmaticMemberUpdate = false;
-            }
-            if (allowPopup && !needle.isBlank() && memberBox.getItemCount() > 0) {
-                SwingUtilities.invokeLater(() -> {
-                    memberSearchEditor().requestFocusInWindow();
-                    memberBox.showPopup();
-                });
-            } else if (!allowPopup) {
-                memberBox.hidePopup();
             }
         }
 
@@ -766,7 +801,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 } else {
                     setMemberEditorText(display == null || display.isBlank() ? preferredMemberAccount : display);
                 }
-                filterMemberDropdown(memberSearchEditor().getText(), false);
+                repopulateMemberDropdownItems("");
             } finally {
                 hydratingMembers = false;
                 programmaticMemberUpdate = false;
@@ -856,16 +891,30 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void loadMembers(boolean force, Runnable afterLoaded) {
-            if (!force && !members.isEmpty()) {
+            String projectId = selectedProjectId();
+            if (!force && projectId.equals(membersLoadedForProjectId) && !members.isEmpty()) {
                 setStatus("成员列表已缓存：" + members.size() + " 个");
                 populateMemberBox();
                 renderBugs();
                 if (afterLoaded != null) afterLoaded.run();
                 return;
             }
-            runAsync("正在获取成员列表...", () -> client.listMembers(selectedProjectId()), items -> {
+            List<Item> cached = membersByProject.get(projectCacheKey(projectId));
+            if (!force && cached != null && !cached.isEmpty()) {
+                members.clear();
+                members.addAll(cached);
+                membersLoadedForProjectId = projectId;
+                populateMemberBox();
+                renderBugs();
+                setStatus("成员列表已缓存：" + members.size() + " 个");
+                if (afterLoaded != null) afterLoaded.run();
+                return;
+            }
+            runAsync("正在获取成员列表...", () -> client.listMembers(projectId), items -> {
                 members.clear();
                 members.addAll(items);
+                membersLoadedForProjectId = projectId;
+                rememberMembersCache(projectId);
                 populateMemberBox();
                 savePreferences();
                 renderBugs();
@@ -945,7 +994,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             properties.setValue("zentao.idea.projectId", selectedProjectId(), "");
             properties.setValue("zentao.idea.memberAccount", selectedMemberAccount(), "");
             properties.setValue("zentao.idea.projects", encodeItems(projects), "");
-            properties.setValue("zentao.idea.members", encodeItems(members), "");
+            rememberMembersCache(selectedProjectId());
+            properties.setValue("zentao.idea.membersByProject", encodeMembersByProject(membersByProject), "");
             properties.setValue("zentao.idea.filters", String.join(",", selectedFilterKeys()), String.join(",", FILTER_KEYS));
         }
 
@@ -962,9 +1012,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             preferredMemberAccount = properties.getValue("zentao.idea.memberAccount", "");
             projects.clear();
             projects.addAll(decodeItems(properties.getValue("zentao.idea.projects", "")));
-            members.clear();
-            members.addAll(decodeItems(properties.getValue("zentao.idea.members", "")));
+            membersByProject.clear();
+            membersByProject.putAll(decodeMembersByProject(properties.getValue("zentao.idea.membersByProject", "")));
+            String legacyMembers = properties.getValue("zentao.idea.members", "");
+            if (!legacyMembers.isBlank() && !preferredProjectId.isBlank()) {
+                membersByProject.putIfAbsent(projectCacheKey(preferredProjectId), decodeItems(legacyMembers));
+            }
             populateProjectBox();
+            applyMembersCacheForProject(preferredProjectId);
             populateMemberBox();
             Set<String> filters = new LinkedHashSet<>(List.of(properties.getValue("zentao.idea.filters", String.join(",", FILTER_KEYS)).split(",")));
             filterChecks.forEach((key, box) -> box.setSelected(filters.contains(key)));
@@ -993,7 +1048,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 display = matched != null ? matched.toString() : preferredMemberAccount;
             }
             setMemberEditorText(display);
-            filterMemberDropdown(display);
+            repopulateMemberDropdownItems("");
             hydratingMembers = false;
             syncMineFilterAvailability();
         }
@@ -1012,6 +1067,50 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 String[] parts = line.split("\t", 2);
                 if (parts.length == 2 && !parts[0].isBlank() && !parts[1].isBlank()) {
                     result.add(new Item(parts[0], parts[1]));
+                }
+            }
+            return result;
+        }
+
+        private static String projectCacheKey(String projectId) {
+            return projectId == null ? "" : projectId;
+        }
+
+        private void rememberMembersCache(String projectId) {
+            if (members.isEmpty()) return;
+            membersByProject.put(projectCacheKey(projectId), new ArrayList<>(members));
+        }
+
+        private void applyMembersCacheForProject(String projectId) {
+            List<Item> cached = membersByProject.get(projectCacheKey(projectId));
+            members.clear();
+            if (cached != null) {
+                members.addAll(cached);
+            }
+            membersLoadedForProjectId = projectCacheKey(projectId);
+        }
+
+        private static String encodeMembersByProject(Map<String, List<Item>> values) {
+            StringBuilder builder = new StringBuilder();
+            for (Map.Entry<String, List<Item>> entry : values.entrySet()) {
+                if (entry.getValue() == null || entry.getValue().isEmpty()) continue;
+                if (builder.length() > 0) builder.append("\n---\n");
+                builder.append(projectCacheKey(entry.getKey())).append("\n");
+                builder.append(encodeItems(entry.getValue()));
+            }
+            return builder.toString();
+        }
+
+        private static Map<String, List<Item>> decodeMembersByProject(String value) {
+            Map<String, List<Item>> result = new LinkedHashMap<>();
+            if (value == null || value.isBlank()) return result;
+            for (String block : value.split("\n---\n")) {
+                int splitAt = block.indexOf('\n');
+                if (splitAt < 0) continue;
+                String projectId = block.substring(0, splitAt).trim();
+                List<Item> items = decodeItems(block.substring(splitAt + 1));
+                if (!items.isEmpty()) {
+                    result.put(projectCacheKey(projectId), items);
                 }
             }
             return result;
@@ -1303,11 +1402,22 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private String selectAssignee() {
             if (members.isEmpty() && client.loggedIn()) {
                 try {
-                    List<Item> loaded = client.listMembers(selectedProjectId());
-                    members.clear();
-                    members.addAll(loaded);
-                    populateMemberBox();
-                    savePreferences();
+                    String projectId = selectedProjectId();
+                    List<Item> cached = membersByProject.get(projectCacheKey(projectId));
+                    if (cached != null && !cached.isEmpty()) {
+                        members.clear();
+                        members.addAll(cached);
+                        membersLoadedForProjectId = projectId;
+                        populateMemberBox();
+                    } else {
+                        List<Item> loaded = client.listMembers(projectId);
+                        members.clear();
+                        members.addAll(loaded);
+                        membersLoadedForProjectId = projectId;
+                        rememberMembersCache(projectId);
+                        populateMemberBox();
+                        savePreferences();
+                    }
                 } catch (Exception error) {
                     Throwable cause = rootCause(error);
                     if (isTransientNetworkError(cause)) {
