@@ -2,6 +2,7 @@ package com.zentao.bugassistant;
 
 import com.intellij.ide.DataManager;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -22,8 +23,11 @@ import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.util.ui.JBUI;
+import java.awt.BasicStroke;
+import java.awt.Component;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Cursor;
 import java.awt.Font;
 import java.awt.FlowLayout;
 import java.awt.Graphics;
@@ -32,14 +36,18 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Image;
 import java.awt.Dimension;
-import java.awt.GradientPaint;
+import java.awt.LinearGradientPaint;
 import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.datatransfer.StringSelection;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.net.SocketTimeoutException;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -62,6 +70,11 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComponent;
@@ -69,7 +82,11 @@ import javax.swing.ImageIcon;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextArea;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.text.JTextComponent;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
@@ -100,24 +117,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final JBTextField accountField = new JBTextField();
         private final JBPasswordField passwordField = new JBPasswordField();
         private final JCheckBox autoLoginBox = new JCheckBox("自动登录", true);
-        private final JButton loginButton = new JButton("登录");
-        private final JLabel loginState = new JLabel("未登录");
+        private final SolidButton loginButton = solidButton("登录", BTN_PRIMARY_BG, ARC_DEFAULT);
+        private final PillBadge loginState = new PillBadge("未登录");
         private final ComboBox<Item> projectBox = new ComboBox<>();
         private final ComboBox<Item> memberBox = new ComboBox<>();
         private final JPanel memberWrap = new JPanel(new BorderLayout(6, 0));
-        private final JCheckBox allFilterBox = new JCheckBox("全部", true);
         private final Map<String, JCheckBox> filterChecks = new LinkedHashMap<>();
         private final JLabel bugCountLabel = new JLabel("共 0 个 Bug");
-        private final JButton refreshButton = new JButton("刷新");
-        private final JButton aiFixAllButton = new GradientButton("✦ AI一键修复");
-        private final JButton clearImageCacheButton = new JButton("清理缓存");
+        private final SolidButton refreshButton = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
+        private final GradientButton aiFixAllButton = new GradientButton("AI一键修复", true, true);
+        private final SolidButton clearImageCacheButton = solidButton("清理缓存", BTN_PRIMARY_BG, ARC_PILL);
         private final ComboBox<String> aiEngineBox = new ComboBox<>(new String[] {"Claude Code"});
         private final JPanel bugListPanel = new JPanel();
         private final JLabel pageLabel = new JLabel("0/0");
-        private final JButton firstPageButton = new JButton("|<");
-        private final JButton prevPageButton = new JButton("<");
-        private final JButton nextPageButton = new JButton(">");
-        private final JButton lastPageButton = new JButton(">|");
+        private final SolidButton firstPageButton = solidButton("|<", BTN_SECONDARY_BG, ARC_DEFAULT, 3, 8);
+        private final SolidButton prevPageButton = solidButton("<", BTN_SECONDARY_BG, ARC_DEFAULT, 3, 8);
+        private final SolidButton nextPageButton = solidButton(">", BTN_SECONDARY_BG, ARC_DEFAULT, 3, 8);
+        private final SolidButton lastPageButton = solidButton(">|", BTN_SECONDARY_BG, ARC_DEFAULT, 3, 8);
         private final JTextArea statusArea = new JTextArea("状态：就绪");
         private final List<String> debugEvents = new ArrayList<>();
         private final ZenTaoClient client = new ZenTaoClient();
@@ -137,18 +153,26 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final Color TOOLBAR_BG = new JBColor(new Color(247, 248, 252), new Color(43, 45, 50));
         private static final Color TEXT_MAIN = new JBColor(new Color(36, 40, 45), new Color(226, 229, 234));
         private static final Color TEXT_SUB = new JBColor(new Color(108, 113, 122), new Color(149, 155, 164));
+        private static final int ARC_PILL = -1;
+        private static final int ARC_DEFAULT = 8;
         private static final Font BUTTON_FONT = new Font("Microsoft YaHei UI", Font.BOLD, 12);
+        private static final Font CHIP_FONT = new Font("Microsoft YaHei UI", Font.PLAIN, 12);
         private static final Color BTN_PRIMARY_BG = new Color(37, 99, 168);
-        private static final Color BTN_SECONDARY_BG = new Color(95, 99, 104);
-        private static final Color BTN_SUCCESS_BG = new Color(47, 125, 70);
-        private static final Color BTN_DANGER_BG = new Color(95, 99, 104);
-        private static final Color BTN_PURPLE_BG = new Color(124, 58, 237);
-        private static final Color BTN_TEXT = new Color(246, 248, 251);
+        private static final Color BTN_PREVIEW_BG = new Color(75, 100, 122);
+        private static final Color BTN_ASSIGN_BG = new Color(37, 99, 168);
+        private static final Color BTN_CONFIRM_BG = new Color(8, 124, 133);
+        private static final Color BTN_RESOLVE_BG = new Color(47, 125, 70);
+        private static final Color BTN_CLOSE_BG = new Color(95, 99, 104);
+        private static final Color BTN_ACTIVATE_BG = new Color(182, 106, 22);
+        private static final Color BTN_SECONDARY_BG = BTN_CLOSE_BG;
+        private static final Color BTN_TEXT = Color.WHITE;
+        private static final Color ACCENT_BLUE = new Color(59, 130, 246);
+        private static final Color PANEL_BORDER = new JBColor(new Color(224, 230, 240), new Color(66, 71, 80));
+        private static final Color FILTER_CHIP_BG = new JBColor(new Color(248, 250, 252), new Color(40, 43, 49));
 
         private ZenTaoBugAssistantPanel(Project project, ToolWindow toolWindow) {
             this.project = project;
             this.toolWindow = toolWindow;
-            client.setPromptImageRoot(project.getBasePath());
             cleanupImageCacheOncePerDay();
             root.setBorder(JBUI.Borders.empty(10));
             root.setBackground(PANEL_BG);
@@ -165,11 +189,13 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             restorePreferences();
             bindEvents();
             if (client.loggedIn()) {
-                loginState.setText("已恢复会话：" + accountField.getText());
-                loginButton.setText("重新登录");
+                updateLoginState(true);
                 startSessionKeepAlive();
                 loadProjectsAfterLogin(false);
-            } else if (autoLoginBox.isSelected() && !accountField.getText().isBlank() && passwordField.getPassword().length > 0) {
+            } else {
+                updateLoginState(false);
+            }
+            if (!client.loggedIn() && autoLoginBox.isSelected() && !accountField.getText().isBlank() && passwordField.getPassword().length > 0) {
                 loginAndRefresh();
             }
         }
@@ -193,7 +219,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             addRow(top, c, 3, "禅道密码", passwordField);
             JPanel loginRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
             loginRow.setOpaque(false);
-            applyTopButton(loginButton, BTN_PRIMARY_BG);
             loginRow.add(autoLoginBox);
             loginRow.add(loginButton);
             loginRow.add(loginState);
@@ -202,34 +227,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             top.add(loginRow, c);
 
             JPanel projectRow = new JPanel(new BorderLayout(6, 0));
-            JButton refreshProjects = new JButton("刷新");
-            applyTopButton(refreshProjects, BTN_PRIMARY_BG);
+            SolidButton refreshProjects = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
             refreshProjects.addActionListener(event -> loadProjects(true));
             projectRow.add(projectBox, BorderLayout.CENTER);
             projectRow.add(refreshProjects, BorderLayout.EAST);
             addRow(top, c, 5, "项目", projectRow);
 
             memberBox.setEditable(true);
+            memberBox.setMaximumRowCount(12);
             memberWrap.add(memberBox, BorderLayout.CENTER);
-            JButton refreshMembers = new JButton("刷新");
-            applyTopButton(refreshMembers, BTN_PRIMARY_BG);
+            SolidButton refreshMembers = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
             refreshMembers.addActionListener(event -> loadMembers(true));
             memberWrap.add(refreshMembers, BorderLayout.EAST);
             addRow(top, c, 6, "成员", memberWrap);
 
             JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
             filters.setOpaque(false);
-            allFilterBox.addActionListener(event -> {
-                if (hydratingFilters) return;
-                hydratingFilters = true;
-                filterChecks.values().forEach(box -> box.setSelected(allFilterBox.isSelected()));
-                hydratingFilters = false;
-                savePreferences();
-                currentPage = 1;
-                renderBugs();
-            });
-            filters.add(allFilterBox);
-            addFilter(filters, "assignedToMe", "我的");
+            addFilter(filters, "assignedToMe", "仅看我的");
             addFilter(filters, "unresolved", "未解决");
             addFilter(filters, "resolved", "已解决");
             addFilter(filters, "closed", "已关闭");
@@ -269,16 +283,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             bar.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(8, 10)));
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
             actions.setOpaque(false);
-            compactButton(refreshButton);
-            compactButton(aiFixAllButton);
-            compactButton(clearImageCacheButton);
-            applyTopButton(refreshButton, BTN_PRIMARY_BG);
-            applyPillButton(aiFixAllButton, BTN_PURPLE_BG);
-            applyPillButton(clearImageCacheButton, BTN_PRIMARY_BG);
-            aiEngineBox.setPrototypeDisplayValue("Claude Code");
             actions.add(refreshButton);
             actions.add(aiFixAllButton);
             actions.add(clearImageCacheButton);
+            aiEngineBox.setPrototypeDisplayValue("Claude Code");
             aiEngineBox.setEnabled(true);
             actions.add(aiEngineBox);
             bar.add(bugCountLabel, BorderLayout.WEST);
@@ -295,10 +303,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             pager.setBackground(TOOLBAR_BG);
             pager.setBorder(new CompoundBorder(new LineBorder(new JBColor(new Color(224, 230, 240), new Color(66, 71, 80)), 1, true), JBUI.Borders.empty(6, 8)));
             pager.add(new JLabel("每页 20 项"));
-            applyTopButton(firstPageButton, BTN_SECONDARY_BG);
-            applyTopButton(prevPageButton, BTN_SECONDARY_BG);
-            applyTopButton(nextPageButton, BTN_SECONDARY_BG);
-            applyTopButton(lastPageButton, BTN_SECONDARY_BG);
             pageLabel.setForeground(TEXT_MAIN);
             pager.add(firstPageButton);
             pager.add(prevPageButton);
@@ -309,37 +313,73 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             return center;
         }
 
-        private void compactButton(JButton button) {
-            button.setMargin(JBUI.insets(2, 8));
+        private static SolidButton solidButton(String text, Color background, int arc) {
+            return solidButton(text, background, arc, 4, 10);
         }
 
-        private void applyPillButton(JButton button, Color background) {
-            button.setFocusPainted(false);
-            button.setOpaque(!(button instanceof GradientButton));
-            button.setBorderPainted(false);
-            button.setContentAreaFilled(!(button instanceof GradientButton));
-            button.setBackground(background);
-            button.setForeground(BTN_TEXT);
-            button.setFont(BUTTON_FONT);
-            button.setBorder(new CompoundBorder(new LineBorder(background.darker(), 1, true), new EmptyBorder(4, 12, 4, 12)));
-            button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        private static SolidButton solidButton(String text, Color background, int arc, int padY, int padX) {
+            SolidButton button = new SolidButton(text, background, arc);
+            button.setBorder(new EmptyBorder(padY, padX, padY, padX));
+            return button;
         }
 
-        private void applyTopButton(JButton button, Color background) {
-            button.setFocusPainted(false);
-            button.setOpaque(true);
-            button.setBorderPainted(false);
-            button.setContentAreaFilled(true);
-            button.setBackground(background);
-            button.setForeground(BTN_TEXT);
-            button.setFont(BUTTON_FONT);
-            button.setBorder(new CompoundBorder(new LineBorder(background.darker(), 1, false), new EmptyBorder(4, 10, 4, 10)));
-            button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        private static void onPress(JButton button, Runnable action) {
+            button.addMouseListener(new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    if (SwingUtilities.isLeftMouseButton(e) && button.isEnabled()) {
+                        action.run();
+                    }
+                }
+            });
         }
 
-        private void applyCardButton(JButton button, Color background) {
-            applyTopButton(button, background);
-            button.setBorder(new CompoundBorder(new LineBorder(background.brighter(), 1, false), new EmptyBorder(3, 10, 3, 10)));
+        private static Color brighten(Color color, float factor) {
+            return new Color(
+                    Math.min(255, Math.round(color.getRed() * factor)),
+                    Math.min(255, Math.round(color.getGreen() * factor)),
+                    Math.min(255, Math.round(color.getBlue() * factor)),
+                    color.getAlpha());
+        }
+
+        private static Color darken(Color color, float factor) {
+            return new Color(
+                    Math.max(0, Math.round(color.getRed() * factor)),
+                    Math.max(0, Math.round(color.getGreen() * factor)),
+                    Math.max(0, Math.round(color.getBlue() * factor)),
+                    color.getAlpha());
+        }
+
+        private static Color withAlpha(Color color, int alpha) {
+            return new Color(color.getRed(), color.getGreen(), color.getBlue(), Math.max(0, Math.min(255, alpha)));
+        }
+
+        private static Color mixColors(Color base, Color accent, float accentWeight) {
+            float baseWeight = 1f - accentWeight;
+            return new Color(
+                    Math.round(base.getRed() * baseWeight + accent.getRed() * accentWeight),
+                    Math.round(base.getGreen() * baseWeight + accent.getGreen() * accentWeight),
+                    Math.round(base.getBlue() * baseWeight + accent.getBlue() * accentWeight));
+        }
+
+        private static void setupPaintQuality(Graphics2D g2) {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
+            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+        }
+
+        private static int cornerRadius(int arc, int height) {
+            return arc < 0 ? height : arc;
+        }
+
+        private static void paintChipSurface(
+                Graphics2D g2, int x, int y, int w, int h, int radius, boolean selected, boolean hover, Color accent) {
+            g2.setColor(selected ? mixColors(FILTER_CHIP_BG, accent, 0.14f) : FILTER_CHIP_BG);
+            g2.fillRoundRect(x, y, w, h, radius, radius);
+            g2.setColor(selected ? withAlpha(accent, 190) : withAlpha(PANEL_BORDER, hover ? 200 : 160));
+            g2.setStroke(new BasicStroke(1f));
+            g2.drawRoundRect(x, y, w - 1, h - 1, radius, radius);
         }
 
         private void addRow(JPanel panel, GridBagConstraints c, int y, String label, JComponent component) {
@@ -356,35 +396,102 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             JCheckBox box = new JCheckBox(text, true);
             box.setOpaque(false);
             box.setForeground(TEXT_SUB);
+            box.setFont(new Font("Microsoft YaHei UI", Font.PLAIN, 12));
             box.addActionListener(event -> {
                 if (hydratingFilters) return;
+                if ("assignedToMe".equals(key) && box.isSelected() && !preferredMemberAccount.isBlank()) {
+                    commitMemberFilter("", "");
+                    return;
+                }
                 refreshAllFilterState();
                 savePreferences();
                 currentPage = 1;
                 renderBugs();
             });
             filterChecks.put(key, box);
-            filters.add(box);
+            filters.add(wrapFilterChip(box));
+        }
+
+        private JPanel wrapFilterChip(JCheckBox box) {
+            JPanel chip = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0)) {
+                private boolean hovered;
+
+                {
+                    setOpaque(false);
+                    setBorder(new EmptyBorder(1, 2, 3, 2));
+                    addMouseListener(new MouseAdapter() {
+                        @Override
+                        public void mouseEntered(MouseEvent event) {
+                            hovered = true;
+                            repaint();
+                        }
+
+                        @Override
+                        public void mouseExited(MouseEvent event) {
+                            hovered = false;
+                            repaint();
+                        }
+                    });
+                }
+
+                @Override
+                protected void paintComponent(Graphics g) {
+                    Graphics2D g2 = (Graphics2D) g.create();
+                    setupPaintQuality(g2);
+                    int radius = getHeight();
+                    if (!box.isEnabled()) {
+                        g2.setColor(FILTER_CHIP_BG);
+                        g2.fillRoundRect(0, 0, getWidth(), getHeight() - 1, radius, radius);
+                        g2.setColor(withAlpha(PANEL_BORDER, 120));
+                        g2.setStroke(new BasicStroke(1f));
+                        g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, radius, radius);
+                    } else {
+                        paintChipSurface(g2, 0, 0, getWidth(), getHeight() - 1, radius, box.isSelected(), hovered, ACCENT_BLUE);
+                    }
+                    g2.dispose();
+                    super.paintComponent(g);
+                }
+            };
+            box.setOpaque(false);
+            box.setForeground(box.isSelected() ? TEXT_MAIN : TEXT_SUB);
+            box.setFont(CHIP_FONT);
+            box.addActionListener(event -> {
+                box.setForeground(box.isSelected() ? TEXT_MAIN : TEXT_SUB);
+                chip.repaint();
+            });
+            chip.add(box);
+            return chip;
         }
 
         private void bindEvents() {
             loginButton.addActionListener(event -> loginAndRefresh());
+            loginState.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            loginState.addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent event) {
+                    loginAndRefresh();
+                }
+            });
             refreshButton.addActionListener(event -> refreshBugs());
             aiFixAllButton.addActionListener(event -> aiFixAll());
             clearImageCacheButton.addActionListener(event -> clearImageCache());
             aiEngineBox.addActionListener(event -> savePreferences());
+            setupMemberSearchBox();
             projectBox.addActionListener(event -> {
                 if (hydratingProjects) return;
                 preferredMemberAccount = "";
-                if (memberBox.getItemCount() > 0) memberBox.setSelectedIndex(0);
+                clearMemberSearchField();
                 savePreferences();
                 refreshBugs();
             });
             memberBox.addActionListener(event -> {
-                if (hydratingMembers) return;
-                savePreferences();
-                currentPage = 1;
-                renderBugs();
+                if (hydratingMembers || programmaticMemberUpdate) return;
+                Object selected = memberBox.getSelectedItem();
+                if (selected instanceof Item) {
+                    commitMemberFilter(((Item) selected).id, selected.toString());
+                } else {
+                    applyMemberFilterSelection(false);
+                }
             });
             firstPageButton.addActionListener(event -> {
                 currentPage = 1;
@@ -404,14 +511,259 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             });
         }
 
+        private JTextComponent memberSearchEditor() {
+            return (JTextComponent) memberBox.getEditor().getEditorComponent();
+        }
+
+        private boolean programmaticMemberUpdate = false;
+
+        private void setupMemberSearchBox() {
+            JTextComponent editor = memberSearchEditor();
+            editor.setToolTipText("搜索成员姓名或账号，留空显示全部成员");
+            DocumentListener searchListener = new DocumentListener() {
+                private void refresh() {
+                    if (hydratingMembers || programmaticMemberUpdate) return;
+                    SwingUtilities.invokeLater(() -> {
+                        if (hydratingMembers || programmaticMemberUpdate) return;
+                        String text = editor.getText();
+                        filterMemberDropdown(text);
+                        if (text.trim().isBlank() && !preferredMemberAccount.isBlank()) {
+                            preferredMemberAccount = "";
+                            syncMineFilterAvailability();
+                            currentPage = 1;
+                            renderBugs();
+                        }
+                    });
+                }
+
+                @Override
+                public void insertUpdate(DocumentEvent event) {
+                    refresh();
+                }
+
+                @Override
+                public void removeUpdate(DocumentEvent event) {
+                    refresh();
+                }
+
+                @Override
+                public void changedUpdate(DocumentEvent event) {
+                    refresh();
+                }
+            };
+            editor.getDocument().addDocumentListener(searchListener);
+            editor.addFocusListener(new FocusAdapter() {
+                @Override
+                public void focusLost(FocusEvent event) {
+                    if (hydratingMembers || event.isTemporary()) return;
+                    applyMemberFilterSelection(false);
+                }
+            });
+            editor.addKeyListener(new KeyAdapter() {
+                @Override
+                public void keyPressed(KeyEvent event) {
+                    if (event.getKeyCode() == KeyEvent.VK_ENTER) {
+                        applyMemberFilterSelection(true);
+                        event.consume();
+                    } else if (event.getKeyCode() == KeyEvent.VK_DOWN && memberBox.getItemCount() > 0) {
+                        memberBox.showPopup();
+                    } else if (event.getKeyCode() == KeyEvent.VK_ESCAPE) {
+                        memberBox.hidePopup();
+                    }
+                }
+            });
+            memberBox.getEditor().addActionListener(event -> {
+                if (hydratingMembers || programmaticMemberUpdate) return;
+                applyMemberFilterSelection(true);
+            });
+        }
+
+        private void setMemberEditorText(String text) {
+            if (!programmaticMemberUpdate) {
+                programmaticMemberUpdate = true;
+                try {
+                    writeMemberEditorText(text);
+                } finally {
+                    programmaticMemberUpdate = false;
+                }
+            } else {
+                writeMemberEditorText(text);
+            }
+        }
+
+        private void writeMemberEditorText(String text) {
+            String value = text == null ? "" : text;
+            memberSearchEditor().setText(value);
+            memberBox.getEditor().setItem(value);
+        }
+
+        private void restoreMemberEditorDisplay() {
+            if (preferredMemberAccount == null || preferredMemberAccount.isBlank()) {
+                setMemberEditorText("");
+                filterMemberDropdown("");
+                return;
+            }
+            Item matched = findMemberItem(preferredMemberAccount);
+            String display = matched != null ? matched.toString() : preferredMemberAccount;
+            setMemberEditorText(display);
+            filterMemberDropdown(display);
+        }
+
+        private Item findMemberBySearchText(String raw) {
+            String text = raw == null ? "" : raw.trim();
+            if (text.isBlank()) return null;
+            for (Item member : members) {
+                if (member.toString().equals(text)
+                        || member.id.equalsIgnoreCase(text)
+                        || member.name.equalsIgnoreCase(text)) {
+                    return member;
+                }
+            }
+            String account = resolveMemberAccount(text);
+            return findMemberItem(account);
+        }
+
+        private void clearMemberComboSelection() {
+            setMemberEditorText("");
+            memberBox.setSelectedIndex(-1);
+        }
+
+        private void clearMemberSearchField() {
+            hydratingMembers = true;
+            preferredMemberAccount = "";
+            memberBox.setSelectedIndex(-1);
+            setMemberEditorText("");
+            filterMemberDropdown("");
+            hydratingMembers = false;
+            syncMineFilterAvailability();
+        }
+
+        private void filterMemberDropdown(String query) {
+            filterMemberDropdown(query, true);
+        }
+
+        private void filterMemberDropdown(String query, boolean allowPopup) {
+            String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+            String preserve = memberSearchEditor().getText();
+            programmaticMemberUpdate = true;
+            hydratingMembers = true;
+            try {
+                memberBox.removeAllItems();
+                for (Item item : members) {
+                    if (needle.isBlank() || matchesMemberSearch(item, needle)) {
+                        memberBox.addItem(item);
+                    }
+                }
+                writeMemberEditorText(preserve);
+                if (preserve.trim().isBlank()) {
+                    memberBox.setSelectedIndex(-1);
+                }
+            } finally {
+                hydratingMembers = false;
+                programmaticMemberUpdate = false;
+            }
+            if (allowPopup && !needle.isBlank() && memberBox.getItemCount() > 0) {
+                SwingUtilities.invokeLater(() -> {
+                    memberSearchEditor().requestFocusInWindow();
+                    memberBox.showPopup();
+                });
+            } else if (!allowPopup) {
+                memberBox.hidePopup();
+            }
+        }
+
+        private static boolean matchesMemberSearch(Item member, String needle) {
+            if (member == null || needle == null || needle.isBlank()) return true;
+            return member.id.toLowerCase(Locale.ROOT).contains(needle)
+                    || member.name.toLowerCase(Locale.ROOT).contains(needle)
+                    || member.toString().toLowerCase(Locale.ROOT).contains(needle);
+        }
+
+        private Item findMemberItem(String account) {
+            if (account == null || account.isBlank()) return null;
+            for (Item item : members) {
+                if (item.id.equalsIgnoreCase(account)) return item;
+            }
+            return null;
+        }
+
+        private String resolveMemberAccount(String value) {
+            String text = value == null ? "" : value.trim();
+            if (text.isBlank()) return "";
+            String explicitAccount = text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
+            for (Item member : members) {
+                if (member.toString().equals(text)
+                        || member.id.equalsIgnoreCase(explicitAccount)
+                        || member.name.equalsIgnoreCase(text)) {
+                    return member.id;
+                }
+            }
+            return explicitAccount;
+        }
+
+        private void applyMemberFilterSelection(boolean fromEnter) {
+            Object editorItem = memberBox.getEditor().getItem();
+            if (editorItem instanceof Item) {
+                commitMemberFilter(((Item) editorItem).id, ((Item) editorItem).toString());
+                return;
+            }
+            String raw = memberSearchEditor().getText().trim();
+            if (raw.isBlank()) {
+                commitMemberFilter("", "");
+                return;
+            }
+            Item matched = findMemberBySearchText(raw);
+            if (matched != null) {
+                commitMemberFilter(matched.id, matched.toString());
+                return;
+            }
+            restoreMemberEditorDisplay();
+            if (fromEnter) {
+                memberSearchEditor().transferFocus();
+            }
+        }
+
+        private void commitMemberFilter(String account, String display) {
+            preferredMemberAccount = account == null ? "" : account.trim();
+            programmaticMemberUpdate = true;
+            hydratingMembers = true;
+            try {
+                if (preferredMemberAccount.isBlank()) {
+                    memberBox.setSelectedIndex(-1);
+                    setMemberEditorText("");
+                } else {
+                    setMemberEditorText(display == null || display.isBlank() ? preferredMemberAccount : display);
+                }
+                filterMemberDropdown(memberSearchEditor().getText(), false);
+            } finally {
+                hydratingMembers = false;
+                programmaticMemberUpdate = false;
+            }
+            syncMineFilterAvailability();
+            savePreferences();
+            currentPage = 1;
+            renderBugs();
+        }
+
+        private void syncMineFilterAvailability() {
+            updateMineFilterAvailability();
+        }
+
+        private void updateLoginState(boolean loggedIn) {
+            String account = accountField.getText().trim();
+            loginState.setLoggedIn(loggedIn);
+            loginState.setText(loggedIn ? "已登录：" + account : "未登录");
+            loginState.setToolTipText(loggedIn ? "点击重新登录" : "点击登录");
+            loginButton.setVisible(!loggedIn);
+        }
+
         private void loginAndRefresh() {
             savePreferences();
             runAsync("正在登录禅道...", () -> {
                 client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
                 return "已登录：" + accountField.getText();
             }, message -> {
-                loginState.setText(message);
-                loginButton.setText("重新登录");
+                updateLoginState(true);
                 savePreferences();
                 startSessionKeepAlive();
                 loadProjectsAfterLogin(false);
@@ -531,20 +883,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private String selectedMemberAccount() {
-            Object editorItem = memberBox.isEditable() && memberBox.getEditor() != null ? memberBox.getEditor().getItem() : null;
-            if (editorItem instanceof Item) {
-                return ((Item)editorItem).id;
-            }
-            String editorText = editorItem == null ? "" : editorItem.toString().trim();
-            if (editorText.isBlank() || editorText.equals("全部成员")) return "";
-            if (!editorText.isBlank()) return editorText.contains("|") ? editorText.substring(editorText.lastIndexOf('|') + 1).trim() : editorText;
-            Object item = memberBox.getSelectedItem();
-            if (item instanceof Item) {
-                return ((Item)item).id;
-            }
-            String text = item == null ? "" : item.toString().trim();
-            if (text.isBlank() || text.equals("全部成员")) return "";
-            return text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
+            return preferredMemberAccount == null ? "" : preferredMemberAccount.trim();
         }
 
         private String scopeKey() {
@@ -588,7 +927,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             passwordField.setText(properties.getValue("zentao.idea.password", ""));
             client.restoreSession(serverField.getText(), properties.getValue("zentao.idea.sessionCookies", ""));
             preferredProjectId = properties.getValue("zentao.idea.projectId", "");
-            preferredMemberAccount = "";
+            preferredMemberAccount = properties.getValue("zentao.idea.memberAccount", "");
             projects.clear();
             projects.addAll(decodeItems(properties.getValue("zentao.idea.projects", "")));
             members.clear();
@@ -616,14 +955,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void populateMemberBox() {
             hydratingMembers = true;
-            memberBox.removeAllItems();
-            for (Item item : members) memberBox.addItem(item);
-            if (preferredMemberAccount == null || preferredMemberAccount.isBlank()) {
-                memberBox.getEditor().setItem("");
-            } else {
-                selectItem(memberBox, preferredMemberAccount);
+            String display = "";
+            if (preferredMemberAccount != null && !preferredMemberAccount.isBlank()) {
+                Item matched = findMemberItem(preferredMemberAccount);
+                display = matched != null ? matched.toString() : preferredMemberAccount;
             }
+            setMemberEditorText(display);
+            filterMemberDropdown(display);
             hydratingMembers = false;
+            syncMineFilterAvailability();
         }
 
         private static String encodeItems(List<Item> values) {
@@ -654,10 +994,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void refreshAllFilterState() {
-            hydratingFilters = true;
-            boolean allSelected = filterChecks.values().stream().filter(JCheckBox::isEnabled).allMatch(JCheckBox::isSelected);
-            allFilterBox.setSelected(allSelected);
-            hydratingFilters = false;
         }
 
         private void renderBugs() {
@@ -674,13 +1010,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             } else if (filtered.isEmpty()) {
                 bugListPanel.add(emptyState("当前成员或分类暂无 Bug。原始 " + bugs.size() + " 个，成员过滤后 " + memberFiltered.size() + " 个。"));
             } else {
-                for (BugSummary bug : filtered.subList(start, end)) bugListPanel.add(new BugCard(bug));
+                for (BugSummary bug : filtered.subList(start, end)) {
+                    BugCard card = new BugCard(bug);
+                    card.setAlignmentX(Component.LEFT_ALIGNMENT);
+                    bugListPanel.add(card);
+                    bugListPanel.add(javax.swing.Box.createVerticalStrut(8));
+                }
             }
             bugCountLabel.setText("共 " + filtered.size() + " 个 Bug / 总 " + bugs.size() + " 个");
             setStatus("Bug 原始 " + bugs.size() + " 个，成员过滤 " + memberFiltered.size() + " 个，当前显示 " + filtered.size() + " 个。");
             pageLabel.setText(currentPage + "/" + totalPages);
-            aiFixAllButton.setText("AI一键修复 " + unresolved(filtered).size());
-            aiFixAllButton.setEnabled(!unresolved(filtered).isEmpty());
+            int aiFixCount = unresolved(filtered).size();
+            aiFixAllButton.setText(aiFixCount > 0 ? "AI一键修复 " + aiFixCount : "AI一键修复");
+            aiFixAllButton.setEnabled(aiFixCount > 0);
             bugListPanel.revalidate();
             bugListPanel.repaint();
         }
@@ -690,20 +1032,43 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private List<BugSummary> filterBugsByCategory(List<BugSummary> scopedBugs) {
-            if (allFilterBox.isSelected()) return scopedBugs;
-            Set<String> active = new LinkedHashSet<>();
+            JCheckBox mineBox = filterChecks.get("assignedToMe");
+            boolean mineOnly = mineBox != null && mineBox.isSelected();
+            List<String> statusKeys = List.of("unresolved", "resolved", "closed");
+            Set<String> activeStatus = new LinkedHashSet<>();
             filterChecks.forEach((key, box) -> {
-                if (box.isSelected()) active.add(key);
+                if (statusKeys.contains(key) && box.isSelected()) activeStatus.add(key);
             });
-            if (active.isEmpty() || active.containsAll(FILTER_KEYS)) return scopedBugs;
+            boolean allStatusActive = activeStatus.containsAll(statusKeys);
+            if (!mineOnly && (activeStatus.isEmpty() || allStatusActive)) return scopedBugs;
+            Set<String> mineCandidates = new LinkedHashSet<>();
+            if (mineOnly) {
+                mineCandidates.addAll(personAliases(accountField.getText()));
+                members.stream()
+                        .filter(member -> member.id.equalsIgnoreCase(accountField.getText()))
+                        .findFirst()
+                        .ifPresent(member -> {
+                            mineCandidates.addAll(personAliases(member.id));
+                            mineCandidates.addAll(personAliases(member.name));
+                        });
+            }
             List<BugSummary> result = new ArrayList<>();
             for (BugSummary bug : scopedBugs) {
-                if ((active.contains("assignedToMe") && containsIgnoreCase(bug.assignedTo, accountField.getText()))
-                        || (active.contains("unresolved") && !bug.status.equals("resolved") && !bug.status.equals("closed"))
-                        || (active.contains("resolved") && bug.status.equals("resolved"))
-                        || (active.contains("closed") && bug.status.equals("closed"))) {
-                    result.add(bug);
+                if (mineOnly) {
+                    Set<String> assignedToValues = new LinkedHashSet<>(personAliases(bug.assignedTo));
+                    boolean matchesMine = mineCandidates.stream().anyMatch(candidate ->
+                            assignedToValues.stream().anyMatch(assignedTo ->
+                                    assignedTo.equals(candidate) || assignedTo.contains(candidate) || candidate.contains(assignedTo)));
+                    if (!matchesMine) continue;
                 }
+                if (!activeStatus.isEmpty() && !allStatusActive) {
+                    boolean matchesStatus =
+                            (activeStatus.contains("unresolved") && !bug.status.equals("resolved") && !bug.status.equals("closed"))
+                            || (activeStatus.contains("resolved") && bug.status.equals("resolved"))
+                            || (activeStatus.contains("closed") && bug.status.equals("closed"));
+                    if (!matchesStatus) continue;
+                }
+                result.add(bug);
             }
             return result;
         }
@@ -721,7 +1086,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
             Set<String> candidates = new LinkedHashSet<>(personAliases(selectedMemberAccount()));
             members.stream()
-                    .filter(member -> member.id.equals(selectedMemberAccount()))
+                    .filter(member -> member.id.equalsIgnoreCase(selectedMemberAccount()))
                     .findFirst()
                     .ifPresent(member -> {
                         candidates.addAll(personAliases(member.id));
@@ -740,11 +1105,17 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private void updateMineFilterAvailability() {
             JCheckBox mine = filterChecks.get("assignedToMe");
             if (mine == null) return;
-            boolean disabled = isMineFilterDisabled();
-            if (disabled) {
+            boolean nonSelfSelected = isMineFilterDisabled();
+            hydratingFilters = true;
+            if (nonSelfSelected && mine.isSelected()) {
                 mine.setSelected(false);
             }
-            mine.setEnabled(!disabled);
+            mine.setEnabled(true);
+            mine.setForeground(mine.isSelected() ? TEXT_MAIN : TEXT_SUB);
+            hydratingFilters = false;
+            if (mine.getParent() != null) {
+                mine.getParent().repaint();
+            }
             refreshAllFilterState();
         }
 
@@ -754,7 +1125,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             Set<String> accountValues = new LinkedHashSet<>(personAliases(accountField.getText()));
             Set<String> candidates = new LinkedHashSet<>(personAliases(selectedAccount));
             members.stream()
-                    .filter(member -> member.id.equals(selectedAccount))
+                    .filter(member -> member.id.equalsIgnoreCase(selectedAccount))
                     .findFirst()
                     .ifPresent(member -> {
                         candidates.addAll(personAliases(member.id));
@@ -895,7 +1266,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     populateMemberBox();
                     savePreferences();
                 } catch (Exception error) {
-                    Messages.showErrorDialog(project, "成员列表获取失败：" + readableError(rootCause(error)), "禅道助手");
+                    Throwable cause = rootCause(error);
+                    if (isTransientNetworkError(cause)) {
+                        Messages.showWarningDialog(project, briefStatusError(cause), "禅道助手");
+                    } else {
+                        Messages.showErrorDialog(project, "成员列表获取失败：" + readableError(cause), "禅道助手");
+                    }
                 }
             }
             if (members.isEmpty()) {
@@ -1031,15 +1407,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             new SwingWorker<T, Void>() {
                 @Override
                 protected T doInBackground() throws Exception {
-                    try {
-                        return supplier.get();
-                    } catch (Exception error) {
-                        if (!status.contains("登录") && isSessionExpiredError(error) && canRetryLogin()) {
-                            client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
-                            return supplier.get();
-                        }
-                        throw error;
-                    }
+                    return invokeAsyncSupplier(status, supplier, false);
                 }
 
                 @Override
@@ -1048,18 +1416,41 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     try {
                         onSuccess.accept(get());
                     } catch (Throwable error) {
-                        Throwable cause = rootCause(error);
-                        setStatus("失败：" + briefStatusError(cause));
-                        showErrorPopupWithOptOut("禅道助手", detailedError(cause));
+                        handleAsyncFailure(error);
                     } finally {
                         try {
                             setLoading(false, null);
                         } catch (Exception error) {
-                            setStatus("失败：" + briefStatusError(rootCause(error)));
+                            handleAsyncFailure(error);
                         }
                     }
                 }
             }.execute();
+        }
+
+        private <T> T invokeAsyncSupplier(String status, ThrowingSupplier<T> supplier, boolean retriedNetwork) throws Exception {
+            try {
+                return supplier.get();
+            } catch (Exception error) {
+                if (!status.contains("登录") && isSessionExpiredError(error) && canRetryLogin()) {
+                    client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                    return supplier.get();
+                }
+                if (!retriedNetwork && isTransientNetworkError(error)) {
+                    Thread.sleep(1000);
+                    return invokeAsyncSupplier(status, supplier, true);
+                }
+                throw error;
+            }
+        }
+
+        private void handleAsyncFailure(Throwable error) {
+            Throwable cause = rootCause(error);
+            setStatus("失败：" + briefStatusError(cause));
+            debugLog("async-failed", readableError(cause));
+            if (!isTransientNetworkError(cause)) {
+                showErrorPopupWithOptOut("禅道助手", detailedError(cause));
+            }
         }
 
         private void setLoading(boolean value, String status) {
@@ -1114,9 +1505,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void showDetailedError(String title, Throwable error) {
             Throwable cause = rootCause(error);
-            String message = detailedError(cause);
             setStatus("失败：" + briefStatusError(cause));
-            showErrorPopupWithOptOut(title, message);
+            debugLog("detailed-error", readableError(cause));
+            if (!isTransientNetworkError(cause)) {
+                showErrorPopupWithOptOut(title, detailedError(cause));
+            }
         }
 
         private void showErrorPopupWithOptOut(String title, String message) {
@@ -1153,7 +1546,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private static String briefStatusError(Throwable error) {
             if (isTransientNetworkError(error)) {
-                return "网络请求超时，请检查禅道地址或网络连接";
+                if (error instanceof HttpConnectTimeoutException) {
+                    return "禅道服务器连接超时，请检查地址、VPN 或网络后重试";
+                }
+                if (error instanceof java.net.http.HttpTimeoutException) {
+                    return "禅道请求超时，请稍后重试";
+                }
+                if (error instanceof java.net.UnknownHostException) {
+                    return "无法解析禅道地址，请检查服务器 URL";
+                }
+                if (error instanceof java.net.ConnectException) {
+                    return "无法连接禅道服务器，请检查地址与网络";
+                }
+                return "网络异常，请检查禅道地址或网络连接";
             }
             String message = error.getMessage();
             if (message == null || message.isBlank()) {
@@ -1236,14 +1641,24 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static boolean isTransientNetworkError(Throwable error) {
             Throwable current = error;
             while (current != null) {
-                if (current instanceof java.net.http.HttpTimeoutException
+                if (current instanceof HttpConnectTimeoutException
+                        || current instanceof java.net.http.HttpTimeoutException
+                        || current instanceof SocketTimeoutException
                         || current instanceof java.net.ConnectException
-                        || current instanceof java.net.UnknownHostException) {
+                        || current instanceof java.net.UnknownHostException
+                        || current instanceof java.net.NoRouteToHostException) {
                     return true;
                 }
                 String message = current.getMessage();
-                if (message != null && message.toLowerCase(Locale.ROOT).contains("timed out")) {
-                    return true;
+                if (message != null) {
+                    String lower = message.toLowerCase(Locale.ROOT);
+                    if (lower.contains("timed out")
+                            || lower.contains("connect timed out")
+                            || lower.contains("connection reset")
+                            || lower.contains("connection refused")
+                            || lower.contains("network is unreachable")) {
+                        return true;
+                    }
                 }
                 current = current.getCause();
             }
@@ -1252,83 +1667,89 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private final class BugCard extends JPanel {
             private BugCard(BugSummary bug) {
-                super(new BorderLayout(6, 6));
-                setBorder(new CompoundBorder(new LineBorder(statusColor(bug.status), 1, true), JBUI.Borders.empty(8, 10)));
+                super();
+                setLayout(new javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS));
+                Color borderColor = mixColors(PANEL_BORDER, statusColor(bug.status), 0.3f);
+                setBorder(new CompoundBorder(new LineBorder(borderColor, 1, true), JBUI.Borders.empty(10, 10)));
                 setBackground(statusBackground(bug.status));
                 setOpaque(true);
-                setAlignmentX(LEFT_ALIGNMENT);
-                setMaximumSize(new Dimension(Integer.MAX_VALUE, getPreferredSize().height + 96));
+                setAlignmentX(Component.LEFT_ALIGNMENT);
                 JPanel title = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
                 title.setOpaque(false);
+                title.setAlignmentX(Component.LEFT_ALIGNMENT);
                 JLabel id = new JLabel("#" + bug.id);
                 id.setForeground(new JBColor(new Color(33, 88, 192), new Color(112, 166, 255)));
                 id.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 13));
                 title.add(id);
-                JLabel status = new JLabel(statusText(bug.status));
-                status.setForeground(statusColor(bug.status));
-                status.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 12));
+                PillBadge status = new PillBadge(statusText(bug.status));
+                status.setBadgeColors(statusColor(bug.status), Color.WHITE);
                 title.add(status);
                 JLabel assigned = new JLabel("指派给：" + assigneeText(bug.assignedTo));
                 assigned.setForeground(TEXT_SUB);
+                assigned.setFont(new Font("Microsoft YaHei UI", Font.PLAIN, 11));
                 title.add(assigned);
                 if (!bug.priority.equals("unknown")) title.add(new JLabel(priorityText(bug.priority)));
                 if (bug.hasVideo) title.add(new JLabel("🎬 视频"));
-                add(title, BorderLayout.NORTH);
+                title.setMaximumSize(new Dimension(Integer.MAX_VALUE, title.getPreferredSize().height));
+                add(title);
+                add(javax.swing.Box.createVerticalStrut(4));
                 JLabel summary = new JLabel("<html>" + html(bug.title) + "</html>");
                 summary.setForeground(TEXT_MAIN);
-                summary.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 14));
-                add(summary, BorderLayout.CENTER);
+                summary.setFont(new Font("Microsoft YaHei UI", Font.BOLD, 13));
+                summary.setAlignmentX(Component.LEFT_ALIGNMENT);
+                summary.setMaximumSize(new Dimension(Integer.MAX_VALUE, summary.getPreferredSize().height + 8));
+                add(summary);
+                add(javax.swing.Box.createVerticalStrut(8));
                 JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
                 buttons.setOpaque(false);
-                JButton preview = new JButton("预览");
-                applyCardButton(preview, BTN_SECONDARY_BG);
-                preview.addActionListener(event -> preview(bug.id));
+                buttons.setAlignmentX(Component.LEFT_ALIGNMENT);
+                SolidButton preview = solidButton("预览", BTN_PREVIEW_BG, ARC_DEFAULT);
+                onPress(preview, () -> preview(bug.id));
                 buttons.add(preview);
                 if (!bug.status.equals("resolved") && !bug.status.equals("closed")) {
-                    JButton assign = new JButton("指派");
-                    applyCardButton(assign, new Color(57, 129, 255));
-                    assign.addActionListener(event -> submitWorkflow(bug.id, "assign"));
+                    SolidButton assign = solidButton("指派", BTN_ASSIGN_BG, ARC_DEFAULT);
+                    onPress(assign, () -> submitWorkflow(bug.id, "assign"));
                     buttons.add(assign);
                     if (!bug.confirmed) {
-                        JButton confirm = new JButton("确认");
-                        applyCardButton(confirm, new Color(35, 170, 135));
-                        confirm.addActionListener(event -> submitWorkflow(bug.id, "confirm"));
+                        SolidButton confirm = solidButton("确认", BTN_CONFIRM_BG, ARC_DEFAULT);
+                        onPress(confirm, () -> submitWorkflow(bug.id, "confirm"));
                         buttons.add(confirm);
                     }
-                    JButton resolve = new JButton("解决");
-                    applyCardButton(resolve, BTN_SUCCESS_BG);
-                    resolve.addActionListener(event -> submitWorkflow(bug.id, "resolve"));
+                    SolidButton resolve = solidButton("解决", BTN_RESOLVE_BG, ARC_DEFAULT);
+                    onPress(resolve, () -> submitWorkflow(bug.id, "resolve"));
                     buttons.add(resolve);
-                    JButton close = new JButton("关闭");
-                    applyCardButton(close, BTN_DANGER_BG);
-                    close.addActionListener(event -> submitWorkflow(bug.id, "close"));
+                    SolidButton close = solidButton("关闭", BTN_CLOSE_BG, ARC_DEFAULT);
+                    onPress(close, () -> submitWorkflow(bug.id, "close"));
                     buttons.add(close);
-                    JButton aiFix = new GradientButton("✦ AI修复");
-                    applyCardButton(aiFix, BTN_PURPLE_BG);
-                    aiFix.addActionListener(event -> aiFix(bug.id));
+                    GradientButton aiFix = new GradientButton("AI修复", false, true);
+                    onPress(aiFix, () -> aiFix(bug.id));
                     buttons.add(aiFix);
                 } else if (bug.status.equals("resolved")) {
-                    JButton activate = new JButton("激活");
-                    applyCardButton(activate, new Color(235, 141, 49));
-                    activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
+                    SolidButton activate = solidButton("激活", BTN_ACTIVATE_BG, ARC_DEFAULT);
+                    onPress(activate, () -> submitWorkflow(bug.id, "activate"));
                     buttons.add(activate);
-                    JButton close = new JButton("关闭");
-                    applyCardButton(close, BTN_DANGER_BG);
-                    close.addActionListener(event -> submitWorkflow(bug.id, "close"));
+                    SolidButton close = solidButton("关闭", BTN_CLOSE_BG, ARC_DEFAULT);
+                    onPress(close, () -> submitWorkflow(bug.id, "close"));
                     buttons.add(close);
                 } else {
-                    JButton activate = new JButton("激活");
-                    applyCardButton(activate, new Color(235, 141, 49));
-                    activate.addActionListener(event -> submitWorkflow(bug.id, "activate"));
+                    SolidButton activate = solidButton("激活", BTN_ACTIVATE_BG, ARC_DEFAULT);
+                    onPress(activate, () -> submitWorkflow(bug.id, "activate"));
                     buttons.add(activate);
                 }
-                add(buttons, BorderLayout.SOUTH);
-                addMouseListener(new java.awt.event.MouseAdapter() {
+                buttons.setMaximumSize(new Dimension(Integer.MAX_VALUE, buttons.getPreferredSize().height));
+                add(buttons);
+                addMouseListener(new MouseAdapter() {
                     @Override
-                    public void mouseClicked(java.awt.event.MouseEvent event) {
+                    public void mouseClicked(MouseEvent event) {
                         if (event.getClickCount() == 2) preview(bug.id);
                     }
                 });
+            }
+
+            @Override
+            public Dimension getMaximumSize() {
+                Dimension preferred = getPreferredSize();
+                return new Dimension(Integer.MAX_VALUE, preferred.height);
             }
         }
 
@@ -1380,18 +1801,24 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static Color statusColor(String status) {
             switch (status) {
                 case "resolved": return new Color(31, 122, 58);
-                case "closed": return Color.GRAY;
+                case "closed": return new Color(95, 99, 104);
                 case "active": return new Color(180, 35, 24);
                 default: return new Color(161, 92, 0);
             }
         }
 
         private static Color statusBackground(String status) {
+            Color lightEditor = new Color(245, 247, 250);
+            Color darkEditor = new Color(35, 37, 42);
             switch (status) {
-                case "resolved": return new JBColor(new Color(237, 248, 241), new Color(31, 50, 38));
-                case "closed": return new JBColor(new Color(245, 245, 245), new Color(48, 48, 48));
-                case "active": return new JBColor(new Color(255, 242, 241), new Color(55, 35, 35));
-                default: return new JBColor(new Color(255, 248, 235), new Color(55, 45, 30));
+                case "resolved":
+                    return new JBColor(mixColors(lightEditor, new Color(31, 122, 58), 0.1f), mixColors(darkEditor, new Color(31, 122, 58), 0.1f));
+                case "closed":
+                    return new JBColor(mixColors(lightEditor, new Color(95, 99, 104), 0.08f), mixColors(darkEditor, new Color(95, 99, 104), 0.08f));
+                case "active":
+                    return new JBColor(mixColors(lightEditor, new Color(180, 35, 24), 0.1f), mixColors(darkEditor, new Color(180, 35, 24), 0.1f));
+                default:
+                    return new JBColor(mixColors(lightEditor, new Color(161, 92, 0), 0.1f), mixColors(darkEditor, new Color(161, 92, 0), 0.1f));
             }
         }
 
@@ -1426,20 +1853,209 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             T get() throws Exception;
         }
 
-        private static final class GradientButton extends JButton {
-            private GradientButton(String text) {
+        private static final class SparkleIcon implements Icon {
+            private final int size;
+
+            private SparkleIcon(int size) {
+                this.size = size;
+            }
+
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                setupPaintQuality(g2);
+                g2.setColor(c.getForeground());
+                g2.setStroke(new BasicStroke(1.4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                int cx = x + size / 2;
+                int cy = y + size / 2;
+                int r = Math.max(2, size / 2 - 1);
+                g2.drawLine(cx, cy - r, cx, cy + r);
+                g2.drawLine(cx - r, cy, cx + r, cy);
+                g2.drawLine(cx - r * 2 / 3, cy - r * 2 / 3, cx + r * 2 / 3, cy + r * 2 / 3);
+                g2.drawLine(cx - r * 2 / 3, cy + r * 2 / 3, cx + r * 2 / 3, cy - r * 2 / 3);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth() {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight() {
+                return size;
+            }
+        }
+
+        private static final class SolidButton extends JButton {
+            private final Color baseColor;
+            private final int arc;
+            private boolean hovered;
+
+            @Override
+            public void updateUI() {
+                setUI(new javax.swing.plaf.basic.BasicButtonUI());
+            }
+
+            @Override
+            public boolean contains(int x, int y) {
+                return x >= 0 && y >= 0 && x < getWidth() && y < getHeight();
+            }
+
+            private SolidButton(String text, Color baseColor, int arc) {
                 super(text);
+                this.baseColor = baseColor;
+                this.arc = arc;
+                setFocusPainted(false);
                 setContentAreaFilled(false);
+                setBorderPainted(false);
                 setOpaque(false);
+                setForeground(BTN_TEXT);
+                setFont(BUTTON_FONT);
+                setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                addMouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseEntered(MouseEvent event) {
+                        hovered = true;
+                        repaint();
+                    }
+
+                    @Override
+                    public void mouseExited(MouseEvent event) {
+                        hovered = false;
+                        repaint();
+                    }
+                });
             }
 
             @Override
             protected void paintComponent(Graphics g) {
                 Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                GradientPaint paint = new GradientPaint(0, 0, new Color(124, 58, 237), getWidth() / 2f, getHeight(), new Color(6, 182, 212), true);
-                g2.setPaint(paint);
-                g2.fillRoundRect(0, 0, getWidth(), getHeight(), getHeight(), getHeight());
+                setupPaintQuality(g2);
+                int w = getWidth();
+                int h = getHeight();
+                int radius = cornerRadius(arc, h);
+                Color fill = !isEnabled()
+                        ? withAlpha(baseColor, 100)
+                        : hovered ? brighten(baseColor, 1.08f) : baseColor;
+                g2.setColor(fill);
+                g2.fillRoundRect(0, 0, w, h, radius, radius);
+                g2.dispose();
+                super.paintComponent(g);
+            }
+        }
+
+        private static final class PillBadge extends JLabel {
+            private Color background = new JBColor(new Color(230, 232, 236), new Color(75, 80, 89));
+            private Color foregroundColor = TEXT_SUB;
+
+            private PillBadge(String text) {
+                super(text);
+                setOpaque(false);
+                setFont(CHIP_FONT);
+                setBorder(new EmptyBorder(3, 8, 3, 8));
+            }
+
+            private void setLoggedIn(boolean loggedIn) {
+                if (loggedIn) {
+                    background = new Color(115, 201, 145);
+                    foregroundColor = Color.WHITE;
+                } else {
+                    background = new JBColor(new Color(230, 232, 236), new Color(75, 80, 89));
+                    foregroundColor = TEXT_SUB;
+                }
+                repaint();
+            }
+
+            private void setBadgeColors(Color background, Color foreground) {
+                this.background = background;
+                this.foregroundColor = foreground;
+                repaint();
+            }
+
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                setupPaintQuality(g2);
+                int w = getWidth();
+                int h = getHeight();
+                g2.setColor(background);
+                g2.fillRoundRect(0, 0, w, h, h, h);
+                g2.dispose();
+                setForeground(foregroundColor);
+                super.paintComponent(g);
+            }
+        }
+
+        private static final class GradientButton extends JButton {
+            private static final Color GRADIENT_START = new Color(124, 58, 237);
+            private static final Color GRADIENT_MID = new Color(37, 99, 235);
+            private static final Color GRADIENT_END = new Color(6, 182, 212);
+            private final boolean pill;
+            private boolean hovered;
+
+            @Override
+            public boolean contains(int x, int y) {
+                return x >= 0 && y >= 0 && x < getWidth() && y < getHeight();
+            }
+
+            @Override
+            public void updateUI() {
+                setUI(new javax.swing.plaf.basic.BasicButtonUI());
+            }
+
+            private GradientButton(String text, boolean pill, boolean showSparkle) {
+                super(text);
+                this.pill = pill;
+                setFocusPainted(false);
+                setContentAreaFilled(false);
+                setBorderPainted(false);
+                setOpaque(false);
+                setForeground(Color.WHITE);
+                setFont(BUTTON_FONT);
+                setBorder(new EmptyBorder(4, showSparkle ? 8 : 10, 4, 10));
+                setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                if (showSparkle) {
+                    setIcon(new SparkleIcon(10));
+                    setIconTextGap(4);
+                }
+                addMouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseEntered(MouseEvent event) {
+                        hovered = true;
+                        repaint();
+                    }
+
+                    @Override
+                    public void mouseExited(MouseEvent event) {
+                        hovered = false;
+                        repaint();
+                    }
+                });
+            }
+
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                setupPaintQuality(g2);
+                int w = getWidth();
+                int h = getHeight();
+                int radius = pill ? h : ARC_DEFAULT;
+                if (!isEnabled()) {
+                    g2.setColor(new JBColor(new Color(200, 203, 208), new Color(75, 80, 89)));
+                    g2.fillRoundRect(0, 0, w, h, radius, radius);
+                } else {
+                    LinearGradientPaint paint = new LinearGradientPaint(
+                            0, 0, w, h,
+                            new float[] {0f, 0.52f, 1f},
+                            new Color[] {
+                                    hovered ? brighten(GRADIENT_START, 1.06f) : GRADIENT_START,
+                                    hovered ? brighten(GRADIENT_MID, 1.06f) : GRADIENT_MID,
+                                    hovered ? brighten(GRADIENT_END, 1.06f) : GRADIENT_END
+                            });
+                    g2.setPaint(paint);
+                    g2.fillRoundRect(0, 0, w, h, radius, radius);
+                }
                 g2.dispose();
                 super.paintComponent(g);
             }
@@ -1618,15 +2234,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
             private String baseUrl = DEFAULT_SERVER;
-            private String promptImageRoot = System.getProperty("user.dir");
 
-            private void setPromptImageRoot(String value) {
-                if (value != null && !value.isBlank()) promptImageRoot = value;
+            private static Path bugImageDir() {
+                return Path.of(PathManager.getSystemPath(), "zentao-bug-assistant", "bug-images");
             }
 
             private void cleanupOldPromptImages(Duration maxAge) {
                 if (maxAge == null) return;
-                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                Path imageDir = bugImageDir();
                 if (!Files.isDirectory(imageDir)) return;
                 long expireBefore = System.currentTimeMillis() - maxAge.toMillis();
                 try (java.util.stream.Stream<Path> paths = Files.list(imageDir)) {
@@ -1645,7 +2260,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private void clearPromptImages() {
-                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                Path imageDir = bugImageDir();
                 if (!Files.isDirectory(imageDir)) return;
                 try (java.util.stream.Stream<Path> paths = Files.list(imageDir)) {
                     paths.filter(Files::isRegularFile).forEach(path -> {
@@ -2689,7 +3304,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 String contentType = response.headers().firstValue("content-type").orElse("image/png");
                 if (contentType.contains(";")) contentType = contentType.substring(0, contentType.indexOf(';')).trim();
                 if (!contentType.toLowerCase(Locale.ROOT).startsWith("image/")) throw new IllegalStateException("不是图片响应：" + contentType);
-                Path imageDir = Path.of(promptImageRoot, ".zentao-bug-assistant", "bug-images");
+                Path imageDir = bugImageDir();
                 Files.createDirectories(imageDir);
                 String extension = imageExtension(contentType);
                 String digest = sha1(src).substring(0, 12);

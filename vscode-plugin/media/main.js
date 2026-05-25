@@ -91,7 +91,7 @@ function render(state) {
 
   if (!pageBugs.length) {
     const filterHint = state.bugs.length
-      ? `已拉取 ${state.bugs.length} 个 Bug，当前筛选条件下无匹配项。请勾选「全部」或「未解决」后重试。`
+      ? `已拉取 ${state.bugs.length} 个 Bug，当前筛选条件下无匹配项。请勾选「未解决」后重试。`
       : "当前分类暂无 Bug。";
     root.innerHTML = `<p class="empty">${escapeHtml(filterHint)}</p>`;
     renderPagination(filteredBugs.length, currentBugPage, totalPages);
@@ -191,43 +191,33 @@ function displayBugTitle(bug) {
 
 function renderBugCategoryFilters() {
   const root = document.getElementById("bugCategoryFilters");
-  const mineDisabled = isMineFilterDisabled(lastState);
-  if (mineDisabled && bugCategoryFilters.delete("assignedToMe")) {
+  const nonSelfSelected = isMineFilterDisabled(lastState);
+  if (nonSelfSelected && bugCategoryFilters.delete("assignedToMe")) {
     post("setBugCategoryFilters", { bugCategoryFilters: [...bugCategoryFilters] });
   }
-  const enabledFilterValues = categoryFilterValues.filter((value) => value !== "assignedToMe" || !mineDisabled);
-  const allChecked = enabledFilterValues.every((value) => bugCategoryFilters.has(value));
   const options = [
-    ["all", "全部"],
-    ["assignedToMe", "我的"],
+    ["assignedToMe", "仅看我的"],
     ["unresolved", "未解决"],
     ["resolved", "已解决"],
     ["closed", "已关闭"]
   ];
   root.innerHTML = options.map(([value, label]) => {
-    const checked = value === "all" ? allChecked : bugCategoryFilters.has(value);
-    const disabled = value === "assignedToMe" && mineDisabled;
+    const checked = bugCategoryFilters.has(value);
     return `
-    <label class="filter-chip ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}">
-      <input type="checkbox" value="${escapeAttr(value)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+    <label class="filter-chip ${checked ? "checked" : ""}">
+      <input type="checkbox" value="${escapeAttr(value)}" ${checked ? "checked" : ""} />
       <span>${escapeHtml(label)}</span>
     </label>`;
   }).join("");
   root.querySelectorAll("input").forEach((input) => {
     input.addEventListener("change", () => {
-      if (input.value === "all") {
-        bugCategoryFilters.clear();
-        if (input.checked) {
-          for (const value of enabledFilterValues) {
-            bugCategoryFilters.add(value);
-          }
-        }
+      if (input.value === "assignedToMe" && input.checked && isMineFilterDisabled(lastState)) {
+        post("setAssigneeScope", { assigneeScope: "member", assignee: undefined });
+      }
+      if (input.checked) {
+        bugCategoryFilters.add(input.value);
       } else {
-        if (input.checked) {
-          bugCategoryFilters.add(input.value);
-        } else {
-          bugCategoryFilters.delete(input.value);
-        }
+        bugCategoryFilters.delete(input.value);
       }
       currentBugPage = 1;
       post("setBugCategoryFilters", { bugCategoryFilters: [...bugCategoryFilters] });
@@ -254,18 +244,28 @@ function hydrateCategoryFilters(state) {
 
 function filterBugs(bugs, state) {
   const scopedBugs = filterBugsBySelectedMember(bugs, state);
-  if (!bugCategoryFilters.size || categoryFilterValues.every((value) => bugCategoryFilters.has(value))) {
+  const mineOnly = bugCategoryFilters.has("assignedToMe");
+  const statusKeys = categoryFilterValues.filter((v) => v !== "assignedToMe");
+  const activeStatus = statusKeys.filter((v) => bugCategoryFilters.has(v));
+  const allStatusActive = activeStatus.length === statusKeys.length;
+  if (!mineOnly && (activeStatus.length === 0 || allStatusActive)) {
     return scopedBugs;
   }
   return scopedBugs.filter((bug) => {
-    const mineValues = [state.account].filter(Boolean).map((value) => String(value).toLowerCase());
-    const assignedTo = String(bug.assignedTo ?? "").toLowerCase();
-    return (
-      (bugCategoryFilters.has("assignedToMe") && mineValues.some((value) => assignedTo.includes(value))) ||
-      (bugCategoryFilters.has("unresolved") && bug.status !== "resolved" && bug.status !== "closed") ||
-      (bugCategoryFilters.has("resolved") && bug.status === "resolved") ||
-      (bugCategoryFilters.has("closed") && bug.status === "closed")
-    );
+    if (mineOnly) {
+      const member = (state.members ?? []).find((item) => item.account === state.account);
+      const candidates = memberFilterCandidates(state.account, member);
+      const assignedToValues = personAliases(bug.assignedTo);
+      if (!candidates.some((candidate) => assignedToValues.some((assignedTo) => assignedTo === candidate || assignedTo.includes(candidate) || candidate.includes(assignedTo)))) return false;
+    }
+    if (activeStatus.length > 0 && !allStatusActive) {
+      const matchesStatus =
+        (activeStatus.includes("unresolved") && bug.status !== "resolved" && bug.status !== "closed") ||
+        (activeStatus.includes("resolved") && bug.status === "resolved") ||
+        (activeStatus.includes("closed") && bug.status === "closed");
+      if (!matchesStatus) return false;
+    }
+    return true;
   });
 }
 
