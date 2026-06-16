@@ -2532,10 +2532,90 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     default: assignedTo = account;
                 }
                 for (Map<String, String> param : bugParams(projectId, assignedTo)) {
-                    List<BugSummary> parsed = parseBugs(get("index.php", param, false), assignedTo);
+                    List<BugSummary> parsed = fetchBugListAllPages(param, assignedTo);
                     if (!parsed.isEmpty()) return parsed;
                 }
                 return List.of();
+            }
+
+            private List<BugSummary> fetchBugListAllPages(Map<String, String> baseParams, String assignedTo) throws Exception {
+                Map<String, String> firstParams = new LinkedHashMap<>(baseParams);
+                firstParams.put("pageID", "1");
+                firstParams.put("recPerPage", String.valueOf(PAGE_SIZE));
+                String firstHtml = get("index.php", firstParams, false);
+                List<BugSummary> firstBugs = parseBugs(firstHtml, assignedTo);
+                BugListPager pager = parseBugListPager(firstHtml);
+                if (pager == null || pager.pageTotal <= 1) {
+                    return firstBugs;
+                }
+
+                List<BugSummary> allBugs = new ArrayList<>(firstBugs);
+                for (int page = 2; page <= pager.pageTotal; page++) {
+                    Map<String, String> pageParams = new LinkedHashMap<>(baseParams);
+                    pageParams.put("pageID", String.valueOf(page));
+                    pageParams.put("recPerPage", String.valueOf(pager.recPerPage));
+                    pageParams.put("recTotal", String.valueOf(pager.recTotal));
+                    allBugs.addAll(parseBugs(get("index.php", pageParams, false), assignedTo));
+                }
+                Map<String, BugSummary> deduped = new LinkedHashMap<>();
+                for (BugSummary bug : allBugs) deduped.putIfAbsent(bug.id, bug);
+                return new ArrayList<>(deduped.values());
+            }
+
+            private static BugListPager parseBugListPager(String html) {
+                Integer recTotal = readPagerNumber(html, "recTotal");
+                int recPerPage = readPagerNumber(html, "recPerPage") != null ? readPagerNumber(html, "recPerPage") : PAGE_SIZE;
+                int pageID = readPagerNumber(html, "pageID") != null ? readPagerNumber(html, "pageID") : 1;
+                Integer pageTotal = readPagerNumber(html, "pageTotal");
+
+                Integer total = recTotal;
+                if (total == null) {
+                    Matcher summery = Pattern.compile("共\\s*(?:<[^>]+>\\s*)?(\\d+)\\s*(?:</[^>]+>\\s*)?项", Pattern.CASE_INSENSITIVE).matcher(html);
+                    if (summery.find()) total = Integer.parseInt(summery.group(1));
+                }
+                if (total == null) {
+                    Matcher summery = Pattern.compile(",\\s*共\\s*(\\d+)\\s*项", Pattern.CASE_INSENSITIVE).matcher(html);
+                    if (summery.find()) total = Integer.parseInt(summery.group(1));
+                }
+                if (total == null || total <= 0) return null;
+
+                int perPage = recPerPage > 0 ? recPerPage : PAGE_SIZE;
+                int pages = pageTotal != null && pageTotal > 0 ? pageTotal : Math.max(1, (int) Math.ceil(total / (double) perPage));
+                int current = pageID > 0 ? pageID : 1;
+                return new BugListPager(total, perPage, current, pages);
+            }
+
+            private static Integer readPagerNumber(String html, String key) {
+                Matcher hidden = Pattern.compile("<input\\b[^>]*\\b(?:id|name)=[\"']_?" + Pattern.quote(key) + "[\"'][^>]*\\bvalue=[\"'](\\d+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html);
+                if (hidden.find()) return Integer.parseInt(hidden.group(1));
+                hidden = Pattern.compile("<input\\b[^>]*\\bvalue=[\"'](\\d+)[\"'][^>]*\\b(?:id|name)=[\"']_?" + Pattern.quote(key) + "[\"']", Pattern.CASE_INSENSITIVE).matcher(html);
+                if (hidden.find()) return Integer.parseInt(hidden.group(1));
+
+                Matcher fromUrl = Pattern.compile("[?&]" + Pattern.quote(key) + "=?(\\d+)", Pattern.CASE_INSENSITIVE).matcher(html);
+                Integer value = null;
+                while (fromUrl.find()) {
+                    int parsed = Integer.parseInt(fromUrl.group(1));
+                    value = "recTotal".equalsIgnoreCase(key) ? (value == null ? parsed : Math.max(value, parsed)) : parsed;
+                }
+                if (value != null) return value;
+
+                Matcher fromJs = Pattern.compile(Pattern.quote(key) + "\\s*[:=]\\s*['\"]?(\\d+)", Pattern.CASE_INSENSITIVE).matcher(html);
+                if (fromJs.find()) return Integer.parseInt(fromJs.group(1));
+                return null;
+            }
+
+            private static final class BugListPager {
+                private final int recTotal;
+                private final int recPerPage;
+                private final int pageID;
+                private final int pageTotal;
+
+                private BugListPager(int recTotal, int recPerPage, int pageID, int pageTotal) {
+                    this.recTotal = recTotal;
+                    this.recPerPage = recPerPage;
+                    this.pageID = pageID;
+                    this.pageTotal = pageTotal;
+                }
             }
 
             private List<BugSummary> enrichVideoFlags(List<BugSummary> bugs) {

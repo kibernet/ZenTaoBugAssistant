@@ -15,6 +15,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 
 const defaultTimeoutMs = 10_000;
+const defaultBugRecPerPage = 20;
 export const DEFAULT_ZENTAO_SERVER_URL = "http://zentao.yuwan-game.com:8088/";
 const PLACEHOLDER_SERVER_URLS = new Set([
   "",
@@ -290,17 +291,12 @@ export class ZenTaoClient {
     const bugGroups = await Promise.all(
       assignees.map(async (assignee) => {
         const params = buildBugBrowseParams(query.projectId, assignee);
-        const html = await this.getText("index.php", params, false);
-        const bugs = parseBugList(html, assignee);
+        const bugs = await this.fetchBugListAllPages(params, assignee);
         // #region agent log
         debugLog("B1,B2,B3,B4", "vscode-plugin/src/core/zentaoClient.ts:208", "bug list response parsed", {
           params: redactParams(params),
           assignee: assignee ?? "<all>",
-          ...summarizeBugHtml(html),
-          parsedBugCount: bugs.length,
-          hasLoginExpiredText: isLoginExpiredText(html) || isLoginExpiredText(decodeJsonHtml(html)),
-          hasLicenseExpiredText: /license is expired|版本已经过期/i.test(html),
-          preview: compactText(html).slice(0, 300)
+          parsedBugCount: bugs.length
         });
         // #endregion
         if (bugs.length) {
@@ -320,6 +316,45 @@ export class ZenTaoClient {
     return deduped;
   }
 
+  private async fetchBugListAllPages(baseParams: Record<string, string>, assignee?: string): Promise<ZenTaoBugSummary[]> {
+    const firstParams = {
+      ...baseParams,
+      pageID: "1",
+      recPerPage: String(defaultBugRecPerPage)
+    };
+    const firstHtml = await this.getText("index.php", firstParams, false);
+    const firstBugs = parseBugList(firstHtml, assignee);
+    const pager = parseBugListPager(firstHtml);
+    // #region agent log
+    debugLog("B1,B2,B3,B4", "vscode-plugin/src/core/zentaoClient.ts:fetchBugListAllPages", "bug list first page parsed", {
+      params: redactParams(firstParams),
+      assignee: assignee ?? "<all>",
+      ...summarizeBugHtml(firstHtml),
+      parsedBugCount: firstBugs.length,
+      pager,
+      hasLoginExpiredText: isLoginExpiredText(firstHtml) || isLoginExpiredText(decodeJsonHtml(firstHtml)),
+      hasLicenseExpiredText: /license is expired|版本已经过期/i.test(firstHtml),
+      preview: compactText(firstHtml).slice(0, 300)
+    });
+    // #endregion
+    if (!pager || pager.pageTotal <= 1) {
+      return firstBugs;
+    }
+
+    const allBugs = [...firstBugs];
+    for (let page = 2; page <= pager.pageTotal; page++) {
+      const pageParams = {
+        ...baseParams,
+        pageID: String(page),
+        recPerPage: String(pager.recPerPage),
+        recTotal: String(pager.recTotal)
+      };
+      const html = await this.getText("index.php", pageParams, false);
+      allBugs.push(...parseBugList(html, assignee));
+    }
+    return dedupeById(allBugs);
+  }
+
   private async diagnoseEmptyBugList(baseParams: Record<string, string>, assignee?: string): Promise<ZenTaoBugSummary[]> {
     const diagnosticRequests = bugDiagnosticParams(baseParams);
 
@@ -327,14 +362,12 @@ export class ZenTaoClient {
     let fallbackBugs: ZenTaoBugSummary[] = [];
     for (const params of diagnosticRequests) {
       try {
-        const html = await this.getText("index.php", params, false);
-        const parsedBugs = parseBugList(html, assignee);
+        const parsedBugs = await this.fetchBugListAllPages(params, assignee);
         if (!fallbackBugs.length && parsedBugs.length) {
           fallbackBugs = parsedBugs;
         }
         results.push({
           params: redactParams(params),
-          ...summarizeBugHtml(html),
           parsedBugCount: parsedBugs.length
         });
       } catch (error) {
@@ -1231,6 +1264,59 @@ function summarizeSelectOptions(html: string, name: string): string[] {
     return [];
   }
   return matchAll(select, /<option\b[^>]*>[\s\S]*?<\/option>/gi).map(htmlText).filter(Boolean).slice(0, 12);
+}
+
+interface BugListPager {
+  recTotal: number;
+  recPerPage: number;
+  pageID: number;
+  pageTotal: number;
+}
+
+function parseBugListPager(html: string): BugListPager | undefined {
+  const recTotal = readPagerNumber(html, "recTotal");
+  const recPerPage = readPagerNumber(html, "recPerPage") ?? defaultBugRecPerPage;
+  const pageID = readPagerNumber(html, "pageID") ?? 1;
+  const pageTotal = readPagerNumber(html, "pageTotal");
+
+  let total = recTotal;
+  if (total === undefined) {
+    const summeryMatch =
+      html.match(/共\s*(?:<[^>]+>\s*)?(\d+)\s*(?:<\/[^>]+>\s*)?项/i) ??
+      html.match(/,\s*共\s*(\d+)\s*项/i) ??
+      html.match(/total\s*(?:<[^>]+>\s*)?(\d+)/i);
+    total = summeryMatch ? Number(summeryMatch[1]) : undefined;
+  }
+  if (total === undefined || total <= 0) {
+    return undefined;
+  }
+
+  const perPage = recPerPage > 0 ? recPerPage : defaultBugRecPerPage;
+  const pages = pageTotal && pageTotal > 0 ? pageTotal : Math.max(1, Math.ceil(total / perPage));
+  const current = pageID > 0 ? pageID : 1;
+
+  return { recTotal: total, recPerPage: perPage, pageID: current, pageTotal: pages };
+}
+
+function readPagerNumber(html: string, key: string): number | undefined {
+  const hidden =
+    html.match(new RegExp(`<input\\b[^>]*\\b(?:id|name)=["']_?${key}["'][^>]*\\bvalue=["'](\\d+)["']`, "i")) ??
+    html.match(new RegExp(`<input\\b[^>]*\\bvalue=["'](\\d+)["'][^>]*\\b(?:id|name)=["']_?${key}["']`, "i"));
+  if (hidden?.[1]) {
+    return Number(hidden[1]);
+  }
+
+  const fromUrl = [...html.matchAll(new RegExp(`[?&]${key}=?(\\d+)`, "gi"))].map((match) => Number(match[1]));
+  if (fromUrl.length) {
+    return key.toLowerCase() === "rectotal" ? Math.max(...fromUrl) : fromUrl[0];
+  }
+
+  const fromJs = html.match(new RegExp(`${key}\\s*[:=]\\s*['"]?(\\d+)`, "i"));
+  if (fromJs?.[1]) {
+    return Number(fromJs[1]);
+  }
+
+  return undefined;
 }
 
 function parseBugList(html: string, assignedTo?: string): ZenTaoBugSummary[] {

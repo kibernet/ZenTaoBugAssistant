@@ -5,6 +5,7 @@ const bugCategoryFilters = new Set(categoryFilterValues);
 let currentBugPage = 1;
 const bugsPerPage = 20;
 let lastState;
+let lastFetchedBugCount = -1;
 let categoryFiltersHydrated = false;
 let memberDropdownActiveIndex = -1;
 let memberDropdownMouseDown = false;
@@ -90,6 +91,10 @@ function render(state) {
   document.getElementById("aiEngine").value = state.aiEngine ?? "claudeCode";
   renderLoginState(state);
   renderFilters(state);
+  if (state.bugs.length !== lastFetchedBugCount) {
+    currentBugPage = 1;
+    lastFetchedBugCount = state.bugs.length;
+  }
   const filteredBugs = state.bugs.length ? filterBugs(state.bugs, state) : [];
   renderStatusSummary(state, filteredBugs);
   renderBugCategoryFilters();
