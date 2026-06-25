@@ -182,6 +182,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static final long MAX_CANDIDATE_EVIDENCE_BYTES = 512L * 1024L;
         private static final List<String> FILTER_KEYS = List.of("assignedToMe", "unresolved", "resolved", "closed");
         private static final List<String> DEFAULT_FILTER_KEYS = List.of("unresolved", "resolved", "closed");
+        private static final String OFFICIAL_CLAUDE_TERMINAL_ACTION_ID = "com.anthropic.code.plugin.actions.OpenClaudeInTerminalAction";
         private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Chat", "claude-code.chat", "claudeCode.chat", "ClaudeCode.NewChat", "claude-code.newChat", "claudeCode.newChat", "ClaudeCode.Open", "claude-code.open", "claudeCode.open");
         private static final List<String> TERMINAL_ACTION_IDS = List.of("ActivateTerminalToolWindow", "Terminal.OpenInTerminal", "Terminal.OpenInTerminalProject");
         private static final String SUPPRESS_ERROR_POPUP_KEY = "zentao.idea.suppressErrorPopup";
@@ -422,8 +423,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             aiEngineBox.setPrototypeDisplayValue("Claude");
             aiEngineBox.setEnabled(true);
             bar.add(aiEngineBox);
-            repairModeBox.setPrototypeDisplayValue("Chat");
-            repairModeBox.setEnabled(true);
+            repairModeBox.setPrototypeDisplayValue("CLI");
+            setRepairMode(REPAIR_MODE_CLI);
+            repairModeBox.setEnabled(false);
             bar.add(repairModeBox);
             center.add(bar, BorderLayout.NORTH);
             bugListPanel.setLayout(new javax.swing.BoxLayout(bugListPanel, javax.swing.BoxLayout.Y_AXIS));
@@ -978,7 +980,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             serverField.setText(normalizeServerUrl(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER)));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
-            setRepairMode(properties.getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT));
+            setRepairMode(REPAIR_MODE_CLI);
         }
 
         private void startSessionKeepAlive() {
@@ -1116,7 +1118,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             properties.setValue("zentao.idea.account", accountField.getText(), "");
             properties.setValue("zentao.idea.autoLogin", autoLoginBox.isSelected(), true);
             properties.setValue("zentao.idea.aiEngine", "claudeCode", "claudeCode");
-            properties.setValue("zentao.idea.repairMode", selectedRepairMode(), REPAIR_MODE_CHAT);
+            properties.setValue("zentao.idea.repairMode", REPAIR_MODE_CLI, REPAIR_MODE_CLI);
             savePasswordSecurely();
             properties.unsetValue("zentao.idea.password");
             properties.setValue("zentao.idea.sessionCookies", client.cookieHeader(), "");
@@ -1135,7 +1137,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             accountField.setText(properties.getValue("zentao.idea.account", ""));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
-            setRepairMode(properties.getValue("zentao.idea.repairMode", PropertiesComponent.getInstance().getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT)));
+            setRepairMode(REPAIR_MODE_CLI);
             String legacyPassword = properties.getValue("zentao.idea.password", "");
             if (legacyPassword != null && !legacyPassword.isBlank()) {
                 passwordField.setText(legacyPassword);
@@ -2330,6 +2332,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void sendPromptToCli(String prompt, List<String> bugIds, Path promptFile) throws Exception {
+            if (openOfficialClaudeCodeAndPasteInstruction(promptFile, bugIds)) {
+                setStatus("AI 修复指令已发送到 Claude Code 插件，会话包：" + promptFile);
+                return;
+            }
             String command = buildCliCommand(promptFile, bugIds);
             putPromptOnClipboard(command);
             if (openTerminalAndPasteCommand(command)) {
@@ -2753,6 +2759,49 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             return Base64.getEncoder().encodeToString(command.getBytes(StandardCharsets.UTF_16LE));
         }
 
+        private boolean openOfficialClaudeCodeAndPasteInstruction(Path promptFile, List<String> bugIds) {
+            try {
+                AnAction action = ActionManager.getInstance().getAction(OFFICIAL_CLAUDE_TERMINAL_ACTION_ID);
+                if (action == null) {
+                    debugLog("official-claude-action-missing", OFFICIAL_CLAUDE_TERMINAL_ACTION_ID);
+                    return false;
+                }
+                ZenTaoPlatformCompat.performAction(
+                        action,
+                        DataManager.getInstance().getDataContext(root),
+                        ActionPlaces.UNKNOWN
+                );
+                pasteInstructionIntoClaudeCodeTerminal(claudeCodeInteractiveInstruction(promptFile, bugIds));
+                return true;
+            } catch (Throwable error) {
+                debugLog("official-claude-action-failed", readableError(rootCause(error)));
+                return false;
+            }
+        }
+
+        private String claudeCodeInteractiveInstruction(Path promptFile, List<String> bugIds) {
+            String ids = bugIds == null || bugIds.isEmpty() ? "unknown" : bugIds.stream().map(id -> "#" + id).collect(Collectors.joining(", "));
+            return "请读取下面这个 UTF-8 Markdown 禅道修复会话文件，并直接在当前 IntelliJ 工程里执行修复任务。\n"
+                    + "文件路径：" + promptFile.toAbsolutePath() + "\n"
+                    + "Bug：" + ids + "\n\n"
+                    + "要求：\n"
+                    + "1. 以会话文件里的截图、诊断包、代码证据和修复协议为准。\n"
+                    + "2. 优先做最小可信修复，不要重复扩大搜索范围。\n"
+                    + "3. 修改完成后给出根因、改动文件、验证结果和剩余风险。";
+        }
+
+        private void pasteInstructionIntoClaudeCodeTerminal(String instruction) {
+            javax.swing.Timer timer = new javax.swing.Timer(2600, event -> {
+                ((javax.swing.Timer)event.getSource()).stop();
+                if (project.isDisposed()) return;
+                putPromptOnClipboard(instruction);
+                nativePastePrompt();
+                nativePressEnter();
+            });
+            timer.setRepeats(false);
+            timer.start();
+        }
+
         private boolean openTerminalAndPasteCommand(String command) {
             try {
                 ToolWindow terminal = ToolWindowManager.getInstance(project).getToolWindow("Terminal");
@@ -2797,11 +2846,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private String selectedRepairMode() {
-            return repairModeBox.getSelectedIndex() == 1 ? REPAIR_MODE_CLI : REPAIR_MODE_CHAT;
+            return REPAIR_MODE_CLI;
         }
 
         private void setRepairMode(String mode) {
-            repairModeBox.setSelectedIndex(REPAIR_MODE_CLI.equals(mode) ? 1 : 0);
+            repairModeBox.setSelectedIndex(1);
         }
 
         private String selectedRepairTargetLabel() {
@@ -2985,7 +3034,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             refreshButton.setEnabled(!value);
             clearImageCacheButton.setEnabled(!value);
             aiEngineBox.setEnabled(!value);
-            repairModeBox.setEnabled(!value);
+            repairModeBox.setEnabled(false);
             boolean hasAiTargets = false;
             try {
                 hasAiTargets = !unresolved(filteredBugs()).isEmpty();

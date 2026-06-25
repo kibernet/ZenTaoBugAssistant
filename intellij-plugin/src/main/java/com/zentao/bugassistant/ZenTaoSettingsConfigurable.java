@@ -41,6 +41,8 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
         autoLoginBox = new JCheckBox("启动后自动登录");
         aiEngineBox = new ComboBox<>(new String[] {"Claude"});
         repairModeBox = new ComboBox<>(new String[] {"Chat", "CLI"});
+        repairModeBox.setSelectedIndex(1);
+        repairModeBox.setEnabled(false);
         cliCommandTemplateField = new JBTextField();
         keepAliveSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 120, 1));
 
@@ -78,7 +80,7 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
         return !serverField.getText().equals(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER))
                 || autoLoginBox.isSelected() != properties.getBoolean("zentao.idea.settings.autoLogin", true)
                 || aiEngineBox.getSelectedIndex() != 0
-                || !selectedRepairMode().equals(properties.getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT))
+                || !REPAIR_MODE_CLI.equals(properties.getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CLI))
                 || !cliCommandTemplateField.getText().equals(properties.getValue("zentao.idea.settings.cliCommandTemplate", ""))
                 || ((Number)keepAliveSpinner.getValue()).intValue() != properties.getInt("zentao.idea.settings.keepAliveMinutes", 5);
     }
@@ -89,7 +91,7 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
         properties.setValue("zentao.idea.settings.serverUrl", serverField.getText(), DEFAULT_SERVER);
         properties.setValue("zentao.idea.settings.autoLogin", autoLoginBox.isSelected(), true);
         properties.setValue("zentao.idea.settings.aiEngine", "claudeCode", "claudeCode");
-        properties.setValue("zentao.idea.settings.repairMode", selectedRepairMode(), REPAIR_MODE_CHAT);
+        properties.setValue("zentao.idea.settings.repairMode", REPAIR_MODE_CLI, REPAIR_MODE_CLI);
         properties.setValue("zentao.idea.settings.cliCommandTemplate", cliCommandTemplateField.getText(), "");
         properties.setValue("zentao.idea.settings.keepAliveMinutes", ((Number)keepAliveSpinner.getValue()).intValue(), 5);
     }
@@ -100,18 +102,18 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
         serverField.setText(normalizeSettingsServerUrl(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER)));
         autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
         aiEngineBox.setSelectedIndex(0);
-        setRepairMode(properties.getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT));
+        setRepairMode(REPAIR_MODE_CLI);
         cliCommandTemplateField.setText(properties.getValue("zentao.idea.settings.cliCommandTemplate", ""));
         keepAliveSpinner.setValue(properties.getInt("zentao.idea.settings.keepAliveMinutes", 5));
     }
 
     private String selectedRepairMode() {
-        return repairModeBox != null && repairModeBox.getSelectedIndex() == 1 ? REPAIR_MODE_CLI : REPAIR_MODE_CHAT;
+        return REPAIR_MODE_CLI;
     }
 
     private void setRepairMode(String mode) {
         if (repairModeBox != null) {
-            repairModeBox.setSelectedIndex(REPAIR_MODE_CLI.equals(mode) ? 1 : 0);
+            repairModeBox.setSelectedIndex(1);
         }
     }
 
