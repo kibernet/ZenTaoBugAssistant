@@ -1,5 +1,7 @@
 export type AiEngine = "cursor" | "claudeCode";
 
+export type AiRepairMode = "chat" | "cli";
+
 export type BugPriority = "high" | "medium" | "low" | "unknown";
 
 export type BugStatus = "active" | "resolved" | "closed" | "unknown";

@@ -1,7 +1,8 @@
 ﻿const vscode = acquireVsCodeApi();
 const selectedIds = new Set();
 const categoryFilterValues = ["assignedToMe", "unresolved", "resolved", "closed"];
-const bugCategoryFilters = new Set(categoryFilterValues);
+const defaultCategoryFilterValues = ["unresolved", "resolved", "closed"];
+const bugCategoryFilters = new Set(defaultCategoryFilterValues);
 let currentBugPage = 1;
 const bugsPerPage = 20;
 let lastState;
@@ -42,6 +43,9 @@ document.getElementById("clearImageCache").addEventListener("click", () => post(
 document.getElementById("aiEngine").addEventListener("change", (event) => {
   post("setAiEngine", { aiEngine: event.target.value });
 });
+document.getElementById("repairMode").addEventListener("change", (event) => {
+  post("setRepairMode", { repairMode: event.target.value });
+});
 document.getElementById("refreshProjects").addEventListener("click", () => post("refreshProjects"));
 document.getElementById("refreshMembers").addEventListener("click", () => post("refreshMembers"));
 document.getElementById("project").addEventListener("change", (event) => {
@@ -79,7 +83,7 @@ function render(state) {
   }
   const passwordInput = document.getElementById("password");
   if (document.activeElement !== passwordInput) {
-    if (state.hasSavedPassword) {
+    if (state.hasSavedPassword || state.loggedIn) {
       passwordInput.value = PASSWORD_MASK;
       passwordInput.dataset.saved = "true";
     } else if (passwordInput.dataset.saved === "true") {
@@ -89,6 +93,7 @@ function render(state) {
   }
   document.getElementById("autoLogin").checked = Boolean(state.autoLoginEnabled);
   document.getElementById("aiEngine").value = state.aiEngine ?? "claudeCode";
+  document.getElementById("repairMode").value = state.repairMode ?? "chat";
   renderLoginState(state);
   renderFilters(state);
   if (state.bugs.length !== lastFetchedBugCount) {
@@ -106,7 +111,7 @@ function render(state) {
   }
 
   if (!state.bugs.length) {
-    root.innerHTML = `<p class="empty">暂无 Bug，请先登录或刷新。</p>`;
+    root.innerHTML = `<p class="empty">暂无 Bug，请先登录或刷新，并检查项目、成员和状态筛选条件。</p>`;
     renderPagination(0, 0, 0);
     updateAiFixButton([]);
     return;
@@ -687,8 +692,10 @@ function resolveAssigneeValue(value, members) {
 
 function postLogin() {
   post("login", {
+    serverUrl: document.getElementById("serverUrl").value,
     account: document.getElementById("account").value,
-    password: document.getElementById("password").value
+    password: document.getElementById("password").value,
+    autoLoginEnabled: document.getElementById("autoLogin").checked
   });
 }
 

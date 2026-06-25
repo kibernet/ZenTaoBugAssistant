@@ -24,9 +24,24 @@ intellij {
 
 tasks {
     patchPluginXml {
-        sinceBuild.set("211")
+        sinceBuild.set("213")
     }
     buildSearchableOptions {
         enabled = false
     }
+}
+
+val sourceSets = extensions.getByType<org.gradle.api.tasks.SourceSetContainer>()
+val parserSelfTest by tasks.registering(JavaExec::class) {
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.zentao.bugassistant.ZenTaoParserSelfTest")
+}
+
+tasks.named<org.jetbrains.intellij.tasks.InitializeIntelliJPluginTask>("initializeIntelliJPlugin") {
+    selfUpdateCheck.set(false)
+}
+
+tasks.named("check") {
+    dependsOn(parserSelfTest)
 }

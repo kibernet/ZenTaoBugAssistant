@@ -1,7 +1,7 @@
 {
   "name": "zentao-bug-assistant-vscode",
   "displayName": "ZenTao Bug Assistant",
-  "description": "Fetch assigned ZenTao bugs and send fix prompts to Cursor or Claude Code.",
+  "description": "AI-powered ZenTao bug repair context workflow for Cursor, Claude, and CLI agents.",
   "version": "1.0.1",
   "publisher": "kibernet",
   "icon": "images/icon.png",
@@ -15,7 +15,19 @@
     "node": ">=18.0.0"
   },
   "categories": [
+    "AI",
     "Other"
+  ],
+  "keywords": [
+    "zentao",
+    "bug",
+    "defect",
+    "issue",
+    "ai",
+    "cursor",
+    "claude",
+    "cli",
+    "automation"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -62,11 +74,6 @@
         "command": "zentaoBugAssistant.copyProjectDebugInfo",
         "title": "禅道助手：复制项目调试信息",
         "icon": "$(bug)"
-      },
-      {
-        "command": "zentaoBugAssistant.crawlDebugInfo",
-        "title": "禅道助手：深度诊断 Bug 入口",
-        "icon": "$(search)"
       }
     ],
     "menus": {
@@ -103,9 +110,6 @@
         },
         {
           "command": "zentaoBugAssistant.copyProjectDebugInfo"
-        },
-        {
-          "command": "zentaoBugAssistant.crawlDebugInfo"
         }
       ]
     },
@@ -114,8 +118,8 @@
       "properties": {
         "zentaoBugAssistant.serverUrl": {
           "type": "string",
-          "default": "http://zentao.yuwan-game.com:8088/",
-          "description": "禅道服务器地址，安装后默认填入公司禅道地址，可按需修改。"
+          "default": "http://your-zentao-server/",
+          "description": "禅道服务器地址。安装后请改成你的团队禅道地址。"
         },
         "zentaoBugAssistant.aiEngine": {
           "type": "string",
@@ -125,10 +129,28 @@
           ],
           "enumDescriptions": [
             "使用 Cursor 内置 AI 聊天",
-            "使用 Claude Code 扩展"
+            "使用 Claude"
           ],
           "default": "claudeCode",
           "description": "AI 修复引擎。"
+        },
+        "zentaoBugAssistant.repairMode": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "cli"
+          ],
+          "enumDescriptions": [
+            "使用 Cursor 或 Claude 的聊天窗口修复 Bug",
+            "把提示词保存为文件，并在编辑器终端执行命令修复 Bug"
+          ],
+          "default": "chat",
+          "description": "AI 修复方式。"
+        },
+        "zentaoBugAssistant.cliCommandTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "CLI 修复命令模板。可用占位符：{promptFile}、{promptFileRaw}、{bugIds}、{engine}。留空时按当前 AI 引擎使用默认命令。"
         },
         "zentaoBugAssistant.autoLogin": {
           "type": "boolean",
@@ -166,6 +188,9 @@
     "vscode:prepublish": "npm run build",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test:parser": "esbuild test/zentaoClientParser.test.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=.test-dist/zentaoClientParser.test.js && node .test-dist/zentaoClientParser.test.js",
+    "test:prompt": "esbuild test/zentaoPrompt.test.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=.test-dist/zentaoPrompt.test.js && node .test-dist/zentaoPrompt.test.js",
+    "test": "npm run check && npm run test:parser && npm run test:prompt",
     "package": "npm run package:vsix",
     "package:vsix": "vsce package -o zentao-bug-assistant-%npm_package_version%.vsix"
   },

@@ -43,9 +43,9 @@ call :ensure_gradle || exit /b %ERRORLEVEL%
 pushd "%INTELLIJ_DIR%" || exit /b 1
 if exist build\distributions\*.zip del /q build\distributions\*.zip
 if exist gradlew.bat (
-    call gradlew.bat --no-daemon --console=plain clean buildPlugin
+    call gradlew.bat --no-daemon --console=plain clean parserSelfTest buildPlugin
 ) else (
-    call gradle --no-daemon --console=plain clean buildPlugin
+    call gradle --no-daemon --console=plain clean parserSelfTest buildPlugin
 )
 set "BUILD_CODE=%ERRORLEVEL%"
 popd
@@ -90,6 +90,30 @@ set "BUILD_CODE=%ERRORLEVEL%"
 if not "%BUILD_CODE%"=="0" (
     popd
     echo [ERROR] VS Code/Cursor TypeScript build failed with exit code %BUILD_CODE%.
+    exit /b %BUILD_CODE%
+)
+
+call npm run check
+set "BUILD_CODE=%ERRORLEVEL%"
+if not "%BUILD_CODE%"=="0" (
+    popd
+    echo [ERROR] VS Code/Cursor TypeScript check failed with exit code %BUILD_CODE%.
+    exit /b %BUILD_CODE%
+)
+
+call npm run test:parser
+set "BUILD_CODE=%ERRORLEVEL%"
+if not "%BUILD_CODE%"=="0" (
+    popd
+    echo [ERROR] VS Code/Cursor parser regression tests failed with exit code %BUILD_CODE%.
+    exit /b %BUILD_CODE%
+)
+
+call npm run test:prompt
+set "BUILD_CODE=%ERRORLEVEL%"
+if not "%BUILD_CODE%"=="0" (
+    popd
+    echo [ERROR] VS Code/Cursor prompt regression tests failed with exit code %BUILD_CODE%.
     exit /b %BUILD_CODE%
 )
 

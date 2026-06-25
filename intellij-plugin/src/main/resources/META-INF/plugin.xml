@@ -5,8 +5,8 @@
     <vendor>Kibernet</vendor>
 
     <description><![CDATA[
-        <p>ZenTao Bug Assistant integrates ZenTao bug tracking with IntelliJ IDEA and Claude Code for AI-assisted bug fixing.</p>
-        <p>在 IntelliJ IDEA 侧边栏中登录禅道、查看分配给你的 Bug，一键把 Bug 详情发送给 <b>Claude Code</b> 进行 AI 辅助修复。</p>
+        <p>ZenTao Bug Assistant turns ZenTao bug reports into AI-ready code repair context inside IntelliJ IDEA.</p>
+        <p>插件不替代禅道的项目管理能力，只补齐缺陷单到 <b>Claude Chat</b> 或命令行 Agent 之间缺的工程上下文层。</p>
 
         <h3>主要功能</h3>
         <ul>
@@ -14,14 +14,21 @@
             <li><b>查看 Bug 列表</b> — 按项目、成员、状态（未解决 / 已解决 / 已关闭）筛选</li>
             <li><b>仅看我的</b> — 一键过滤出指派给自己的 Bug</li>
             <li><b>预览 Bug 详情</b> — 在编辑器标签页中渲染重现步骤、截图和附件</li>
-            <li><b>AI 一键修复</b> — 把 Bug 描述和截图整理成提示词，直接发送到 Claude Code</li>
+            <li><b>AI 一键修复</b> — 把 Bug 描述和截图整理成提示词，发送到 Claude Chat 或 CLI Agent</li>
+            <li><b>代码证据包</b> — 基于 Bug 文本关键词在当前 Git 仓库中搜索代码命中行</li>
+            <li><b>验证命令推荐</b> — 根据当前仓库技术栈提示构建、测试、类型检查或 Unity Test Runner 入口</li>
+            <li><b>AI 上下文质量评估</b> — 自动附加评分、已具备信号和待补强缺口</li>
+            <li><b>结构化修复协议</b> — 约束 AI 输出根因、改动文件、验证结果、风险和禅道回写摘要</li>
+            <li><b>AI 诊断包直送</b> — 自动汇总上下文质量、截图数量、Prompt 规模和诊断包，并直接发送到 Chat / CLI</li>
+            <li><b>Chat / CLI 双模式</b> — 可选择沿用聊天窗口，也可生成 Prompt 文件并在 Terminal 执行命令</li>
+            <li><b>修复后回写</b> — 解决/关闭 Bug 时根据当前 Git diff 生成禅道备注草稿</li>
             <li><b>批量修复</b> — 对当前列表中所有未解决 Bug 逐一生成提示词并发送</li>
             <li><b>禅道状态同步</b> — 行内执行指派、确认、解决、关闭、激活操作</li>
         </ul>
 
         <h3>使用前提</h3>
         <ul>
-            <li>已安装 <a href="https://plugins.jetbrains.com/plugin/22653-claude-code">Claude Code</a> 插件</li>
+            <li>已安装 <a href="https://plugins.jetbrains.com/plugin/22653-claude-code">Claude Code</a> 插件，或可用的命令行 AI Agent</li>
             <li>可访问自己团队的禅道服务器（支持禅道 17+ 的 Web 界面）</li>
         </ul>
     ]]></description>
@@ -31,19 +38,26 @@
         <ul>
             <li>修复 Marketplace 兼容性警告（废弃 API）</li>
             <li>优化登录界面：账号与密码同一行显示</li>
-            <li>默认禅道地址预填为 http://zentao.yuwan-game.com:8088/</li>
+            <li>新增 Chat / CLI 修复方式下拉框，支持命令行 Agent 工作流</li>
+            <li>新增代码证据包，AI 修复 Prompt 会带上仓库内容命中线索</li>
+            <li>新增验证命令推荐，诊断包会提示当前仓库可运行的构建/测试入口</li>
+            <li>新增 AI 上下文质量评估，自动附加上下文评分和缺口</li>
+            <li>新增结构化修复协议，AI 输出会按根因、改动、验证、风险和禅道回写摘要组织</li>
+            <li>新增 AI 诊断包直送，自动附加诊断包和上下文质量并直接发送到 Chat / CLI</li>
+            <li>新增 Git diff 回写备注草稿，解决/关闭 Bug 前可直接确认提交</li>
+            <li>默认禅道地址改为通用占位地址，安装后按团队环境配置</li>
         </ul>
         <h3>1.0.0</h3>
         <ul>
             <li>首次发布</li>
             <li>支持登录禅道并查看 Bug 列表</li>
             <li>支持按项目、成员、状态筛选</li>
-            <li>支持 AI 一键修复（发送提示词到 Claude Code）</li>
+            <li>支持 AI 一键修复（发送提示词到 Claude）</li>
             <li>支持禅道工作流操作（指派、确认、解决、关闭、激活）</li>
         </ul>
     ]]></change-notes>
 
-    <idea-version since-build="211"/>
+    <idea-version since-build="213"/>
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">

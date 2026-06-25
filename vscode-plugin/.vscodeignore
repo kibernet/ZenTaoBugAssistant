@@ -1,5 +1,7 @@
 .vscode/**
 src/**
+test/**
+.test-dist/**
 *.map
 tsconfig.json
 package-lock.json

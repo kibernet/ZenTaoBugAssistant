@@ -13,7 +13,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("zentaoBugAssistant.login", () => provider.login()),
     vscode.commands.registerCommand("zentaoBugAssistant.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("zentaoBugAssistant.fixSelected", () => provider.fixSelected()),
-    vscode.commands.registerCommand("zentaoBugAssistant.crawlDebugInfo", () => provider.crawlCurrentBugAccess()),
     vscode.commands.registerCommand("zentaoBugAssistant.copyProjectDebugInfo", () => provider.copyProjectDebugInfo())
   );
 }

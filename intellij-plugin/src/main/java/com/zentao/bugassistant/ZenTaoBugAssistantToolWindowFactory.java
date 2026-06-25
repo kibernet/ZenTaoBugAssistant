@@ -1,20 +1,29 @@
 package com.zentao.bugassistant;
 
+import com.intellij.credentialStore.CredentialAttributes;
+import com.intellij.credentialStore.Credentials;
 import com.intellij.ide.DataManager;
+import com.intellij.ide.passwordSafe.PasswordSafe;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
+import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBPasswordField;
 import com.intellij.ui.components.JBScrollPane;
@@ -100,15 +109,102 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         toolWindow.getContentManager().addContent(content);
     }
 
+    static List<Map<String, String>> parseBugListForTest(String html) {
+        ZenTaoBugAssistantPanel.ZenTaoClient client = new ZenTaoBugAssistantPanel.ZenTaoClient();
+        List<Map<String, String>> result = new ArrayList<>();
+        for (ZenTaoBugAssistantPanel.BugSummary bug : client.parseBugs(html, "")) {
+            Map<String, String> item = new LinkedHashMap<>();
+            item.put("id", bug.id);
+            item.put("title", bug.title);
+            item.put("priority", bug.priority);
+            item.put("status", bug.status);
+            item.put("assignedTo", bug.assignedTo);
+            item.put("openedBy", bug.openedBy);
+            item.put("confirmed", String.valueOf(bug.confirmed));
+            result.add(item);
+        }
+        return result;
+    }
+
+    static Map<String, Integer> parseBugPagerForTest(String html) {
+        ZenTaoBugAssistantPanel.ZenTaoClient.BugListPager pager = ZenTaoBugAssistantPanel.ZenTaoClient.parseBugListPager(html);
+        Map<String, Integer> result = new LinkedHashMap<>();
+        if (pager == null) return result;
+        result.put("recTotal", pager.recTotal);
+        result.put("recPerPage", pager.recPerPage);
+        result.put("pageID", pager.pageID);
+        result.put("pageTotal", pager.pageTotal);
+        return result;
+    }
+
+    static String buildPromptForTest() {
+        ZenTaoBugAssistantPanel.BugDetail detail = new ZenTaoBugAssistantPanel.BugDetail(
+                "183099",
+                "渔场激光技能触发斩杀时索敌结束",
+                "medium",
+                "active",
+                "06-02 10:55",
+                "王强强",
+                "石挺现",
+                "触发斩杀时索敌时间结束，没有用激光但是在发炮。",
+                "",
+                "进入渔场，触发激光技能斩杀。",
+                "",
+                "技能表现和发炮状态一致。",
+                "",
+                "没有用激光但是在发炮。",
+                List.of(
+                        new ZenTaoBugAssistantPanel.Attachment("repro.mp4", "http://zentao.example/file.mp4", "video"),
+                        new ZenTaoBugAssistantPanel.Attachment("screen.png", "C:/tmp/screen.png", "image")
+                ),
+                List.of("C:/tmp/screen.png")
+        );
+        return ZenTaoBugAssistantPanel.PromptBuilder.build(detail);
+    }
+
     private static final class ZenTaoBugAssistantPanel {
-        private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
+        private static final String DEFAULT_SERVER = "http://your-zentao-server/";
+        private static final String REPAIR_MODE_CHAT = "chat";
+        private static final String REPAIR_MODE_CLI = "cli";
+        private static final String PASSWORD_MASK = "********";
         private static final int PAGE_SIZE = 20;
         private static final int DEFAULT_KEEP_ALIVE_MINUTES = 5;
         private static final Duration HTTP_CONNECT_TIMEOUT = Duration.ofSeconds(15);
         private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofSeconds(45);
+        private static final int MAX_EDITOR_WORKSPACE_FILES = 20000;
+        private static final int MAX_CANDIDATE_EVIDENCE_FILES = 48;
+        private static final long MAX_CANDIDATE_EVIDENCE_BYTES = 512L * 1024L;
         private static final List<String> FILTER_KEYS = List.of("assignedToMe", "unresolved", "resolved", "closed");
+        private static final List<String> DEFAULT_FILTER_KEYS = List.of("unresolved", "resolved", "closed");
         private static final List<String> CLAUDE_ACTION_IDS = List.of("ClaudeCode.Chat", "claude-code.chat", "claudeCode.chat", "ClaudeCode.NewChat", "claude-code.newChat", "claudeCode.newChat", "ClaudeCode.Open", "claude-code.open", "claudeCode.open");
+        private static final List<String> TERMINAL_ACTION_IDS = List.of("ActivateTerminalToolWindow", "Terminal.OpenInTerminal", "Terminal.OpenInTerminalProject");
         private static final String SUPPRESS_ERROR_POPUP_KEY = "zentao.idea.suppressErrorPopup";
+        private static final Set<String> COMMON_BUG_TERMS = Set.of(
+                "bug",
+                "issue",
+                "error",
+                "null",
+                "undefined",
+                "true",
+                "false",
+                "http",
+                "https",
+                "image",
+                "video",
+                "button",
+                "click",
+                "page",
+                "测试",
+                "测试用",
+                "显示",
+                "问题",
+                "页面",
+                "时候",
+                "没有",
+                "需要",
+                "后台",
+                "回来"
+        );
 
         private final Project project;
         private final ToolWindow toolWindow;
@@ -126,7 +222,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private final SolidButton refreshButton = solidButton("刷新", BTN_PRIMARY_BG, ARC_DEFAULT);
         private final GradientButton aiFixAllButton = new GradientButton("AI一键修复", true, true);
         private final SolidButton clearImageCacheButton = solidButton("清理缓存", BTN_PRIMARY_BG, ARC_PILL);
-        private final ComboBox<String> aiEngineBox = new ComboBox<>(new String[] {"Claude Code"});
+        private final ComboBox<String> aiEngineBox = new ComboBox<>(new String[] {"Claude"});
+        private final ComboBox<String> repairModeBox = new ComboBox<>(new String[] {"Chat", "CLI"});
         private final JPanel bugListPanel = new JPanel();
         private final JLabel pageLabel = new JLabel("0/0");
         private final SolidButton firstPageButton = solidButton("|<", BTN_SECONDARY_BG, ARC_DEFAULT, 3, 8);
@@ -196,7 +293,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             } else {
                 updateLoginState(false);
             }
-            if (!client.loggedIn() && autoLoginBox.isSelected() && !accountField.getText().isBlank() && passwordField.getPassword().length > 0) {
+            if (!client.loggedIn() && autoLoginBox.isSelected() && canRetryLogin()) {
                 loginAndRefresh();
             }
         }
@@ -316,9 +413,12 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             bar.add(refreshButton);
             bar.add(aiFixAllButton);
             bar.add(clearImageCacheButton);
-            aiEngineBox.setPrototypeDisplayValue("Claude Code");
+            aiEngineBox.setPrototypeDisplayValue("Claude");
             aiEngineBox.setEnabled(true);
             bar.add(aiEngineBox);
+            repairModeBox.setPrototypeDisplayValue("Chat");
+            repairModeBox.setEnabled(true);
+            bar.add(repairModeBox);
             center.add(bar, BorderLayout.NORTH);
             bugListPanel.setLayout(new javax.swing.BoxLayout(bugListPanel, javax.swing.BoxLayout.Y_AXIS));
             bugListPanel.setOpaque(true);
@@ -429,7 +529,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private void addFilter(JPanel filters, String key, String text) {
-            JCheckBox box = new JCheckBox(text, true);
+            JCheckBox box = new JCheckBox(text, !"assignedToMe".equals(key));
             box.setOpaque(false);
             box.setForeground(TEXT_SUB);
             box.setFont(new Font("Microsoft YaHei UI", Font.PLAIN, 12));
@@ -508,10 +608,19 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     loginAndRefresh();
                 }
             });
+            passwordField.addFocusListener(new FocusAdapter() {
+                @Override
+                public void focusGained(FocusEvent event) {
+                    if (PASSWORD_MASK.equals(visiblePasswordText())) {
+                        passwordField.setText("");
+                    }
+                }
+            });
             refreshButton.addActionListener(event -> refreshBugs());
             aiFixAllButton.addActionListener(event -> aiFixAll());
             clearImageCacheButton.addActionListener(event -> clearImageCache());
             aiEngineBox.addActionListener(event -> savePreferences());
+            repairModeBox.addActionListener(event -> savePreferences());
             setupMemberSearchBox();
             projectBox.addActionListener(event -> {
                 if (hydratingProjects) return;
@@ -822,15 +931,23 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             loginState.setText(loggedIn ? "已登录：" + account : "未登录");
             loginState.setToolTipText(loggedIn ? "点击重新登录" : "点击登录");
             loginButton.setVisible(!loggedIn);
+            showPasswordMaskIfLoggedIn(loggedIn);
         }
 
         private void loginAndRefresh() {
             savePreferences();
+            String password = resolvedPasswordForLogin();
+            if (accountField.getText().trim().isBlank() || password.isBlank()) {
+                setStatus("请输入禅道账号和密码。");
+                return;
+            }
             runAsync("正在登录禅道...", () -> {
-                client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                client.login(serverField.getText(), accountField.getText(), password);
                 return "已登录：" + accountField.getText();
             }, message -> {
                 updateLoginState(true);
+                preferredMemberAccount = "";
+                memberBox.setSelectedIndex(-1);
                 savePreferences();
                 startSessionKeepAlive();
                 loadProjectsAfterLogin(false);
@@ -842,6 +959,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             serverField.setText(normalizeServerUrl(properties.getValue("zentao.idea.settings.serverUrl", DEFAULT_SERVER)));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.settings.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
+            setRepairMode(properties.getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT));
         }
 
         private void startSessionKeepAlive() {
@@ -938,15 +1056,6 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             });
         }
 
-        private void copyBugAccessDiagnostic() {
-            if (!client.loggedIn()) return;
-            runAsync("正在收集诊断信息...", () -> client.collectBugAccessDiagnostic(selectedProjectId(), snapshotDebugEvents()), text -> {
-                CopyPasteManager.getInstance().setContents(new StringSelection(text));
-                setStatus("Bug 列表诊断信息已复制到剪贴板。");
-                Messages.showInfoMessage(project, "Bug 列表诊断信息已复制到剪贴板，请粘贴给我继续分析。", "禅道助手");
-            });
-        }
-
         private void clearImageCache() {
             client.clearPromptImages();
             setStatus("本地图片缓存已清理。");
@@ -989,14 +1098,16 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             properties.setValue("zentao.idea.account", accountField.getText(), "");
             properties.setValue("zentao.idea.autoLogin", autoLoginBox.isSelected(), true);
             properties.setValue("zentao.idea.aiEngine", "claudeCode", "claudeCode");
-            properties.setValue("zentao.idea.password", new String(passwordField.getPassword()), "");
+            properties.setValue("zentao.idea.repairMode", selectedRepairMode(), REPAIR_MODE_CHAT);
+            savePasswordSecurely();
+            properties.unsetValue("zentao.idea.password");
             properties.setValue("zentao.idea.sessionCookies", client.cookieHeader(), "");
             properties.setValue("zentao.idea.projectId", selectedProjectId(), "");
-            properties.setValue("zentao.idea.memberAccount", selectedMemberAccount(), "");
+            properties.setValue("zentao.idea.memberAccount", "", "");
             properties.setValue("zentao.idea.projects", encodeItems(projects), "");
             rememberMembersCache(selectedProjectId());
             properties.setValue("zentao.idea.membersByProject", encodeMembersByProject(membersByProject), "");
-            properties.setValue("zentao.idea.filters", String.join(",", selectedFilterKeys()), String.join(",", FILTER_KEYS));
+            properties.setValue("zentao.idea.filters", String.join(",", selectedFilterKeys()), String.join(",", DEFAULT_FILTER_KEYS));
         }
 
         private void restorePreferences() {
@@ -1006,10 +1117,18 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             accountField.setText(properties.getValue("zentao.idea.account", ""));
             autoLoginBox.setSelected(properties.getBoolean("zentao.idea.autoLogin", true));
             aiEngineBox.setSelectedIndex(0);
-            passwordField.setText(properties.getValue("zentao.idea.password", ""));
+            setRepairMode(properties.getValue("zentao.idea.repairMode", PropertiesComponent.getInstance().getValue("zentao.idea.settings.repairMode", REPAIR_MODE_CHAT)));
+            String legacyPassword = properties.getValue("zentao.idea.password", "");
+            if (legacyPassword != null && !legacyPassword.isBlank()) {
+                passwordField.setText(legacyPassword);
+                savePasswordSecurely();
+                properties.unsetValue("zentao.idea.password");
+            } else {
+                passwordField.setText(loadPasswordSecurely(serverField.getText(), accountField.getText()));
+            }
             client.restoreSession(serverField.getText(), properties.getValue("zentao.idea.sessionCookies", ""));
             preferredProjectId = properties.getValue("zentao.idea.projectId", "");
-            preferredMemberAccount = properties.getValue("zentao.idea.memberAccount", "");
+            preferredMemberAccount = "";
             projects.clear();
             projects.addAll(decodeItems(properties.getValue("zentao.idea.projects", "")));
             membersByProject.clear();
@@ -1021,9 +1140,53 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             populateProjectBox();
             applyMembersCacheForProject(preferredProjectId);
             populateMemberBox();
-            Set<String> filters = new LinkedHashSet<>(List.of(properties.getValue("zentao.idea.filters", String.join(",", FILTER_KEYS)).split(",")));
+            Set<String> filters = new LinkedHashSet<>(List.of(properties.getValue("zentao.idea.filters", String.join(",", DEFAULT_FILTER_KEYS)).split(",")));
+            filters.remove("assignedToMe");
             filterChecks.forEach((key, box) -> box.setSelected(filters.contains(key)));
             refreshAllFilterState();
+        }
+
+        private void savePasswordSecurely() {
+            String account = accountField.getText().trim();
+            if (account.isBlank()) return;
+            String password = visiblePasswordText();
+            if (PASSWORD_MASK.equals(password)) {
+                return;
+            }
+            CredentialAttributes attributes = passwordAttributes(serverField.getText(), account);
+            PasswordSafe.getInstance().set(attributes, password.isBlank() ? null : new Credentials(account, password));
+        }
+
+        private String loadPasswordSecurely(String serverUrl, String account) {
+            String normalizedAccount = account == null ? "" : account.trim();
+            if (normalizedAccount.isBlank()) return "";
+            Credentials credentials = PasswordSafe.getInstance().get(passwordAttributes(serverUrl, normalizedAccount));
+            return credentials == null || credentials.getPasswordAsString() == null ? "" : credentials.getPasswordAsString();
+        }
+
+        private static CredentialAttributes passwordAttributes(String serverUrl, String account) {
+            String serviceName = "ZenTao Bug Assistant/" + normalizeServerUrl(serverUrl);
+            String userName = account == null ? "" : account.trim();
+            return new CredentialAttributes(serviceName, userName, ZenTaoBugAssistantToolWindowFactory.class);
+        }
+
+        private String visiblePasswordText() {
+            return new String(passwordField.getPassword()).trim();
+        }
+
+        private String resolvedPasswordForLogin() {
+            String visible = visiblePasswordText();
+            if (!PASSWORD_MASK.equals(visible)) {
+                return visible;
+            }
+            return loadPasswordSecurely(serverField.getText(), accountField.getText());
+        }
+
+        private void showPasswordMaskIfLoggedIn(boolean loggedIn) {
+            if (!loggedIn || !visiblePasswordText().isBlank()) {
+                return;
+            }
+            passwordField.setText(PASSWORD_MASK);
         }
 
         private void populateProjectBox() {
@@ -1119,9 +1282,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private List<String> selectedFilterKeys() {
             List<String> keys = new ArrayList<>();
             filterChecks.forEach((key, box) -> {
-                if (box.isSelected()) keys.add(key);
+                if (box.isSelected() && !"assignedToMe".equals(key)) keys.add(key);
             });
-            return keys;
+            return keys.isEmpty() ? DEFAULT_FILTER_KEYS : keys;
         }
 
         private void refreshAllFilterState() {
@@ -1305,9 +1468,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return details;
             }, details -> {
                 try {
-                    String prompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
-                    sendToClaudeCode(prompt);
-                    setStatus(details.size() + " 个 Bug 已合并发送给 Claude Code with GUI");
+                    String basePrompt = details.size() == 1 ? PromptBuilder.build(details.get(0)) : PromptBuilder.buildBatch(details);
+                    String diagnosticPackage = collectWorkspaceDiagnosticPackage(details);
+                    String prompt = combinePromptWithDiagnostics(basePrompt, diagnosticPackage);
+                    Path sessionFile = sendPromptForRepair(prompt, details.stream().map(detail -> detail.id).collect(Collectors.toList()));
+                    setStatus(details.size() + " 个 Bug 已发送到 " + selectedRepairTargetLabel() + "；会话包：" + sessionFile);
                 } catch (Throwable error) {
                     showDetailedError("AI一键修复失败", error);
                 }
@@ -1320,8 +1485,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return client.getBugDetail(bugId);
             }, detail -> {
                 try {
-                    sendToClaudeCode(PromptBuilder.build(detail));
-                    setStatus("Bug #" + bugId + " 已发送给 Claude Code with GUI");
+                    String diagnosticPackage = collectWorkspaceDiagnosticPackage(List.of(detail));
+                    String prompt = combinePromptWithDiagnostics(PromptBuilder.build(detail), diagnosticPackage);
+                    Path sessionFile = sendPromptForRepair(prompt, List.of(bugId));
+                    setStatus("Bug #" + bugId + " 已发送到 " + selectedRepairTargetLabel() + "；会话包：" + sessionFile);
                 } catch (Throwable error) {
                     showDetailedError("AI修复失败", error);
                 }
@@ -1385,7 +1552,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     default: solution = "fixed";
                 }
             }
-            String defaultComment = action.equals("resolve") ? "已修复，请验证。" : action.equals("activate") ? "重新激活，请继续处理。" : "";
+            String defaultComment = buildWorkflowCommentDraft(bugId, action);
             String comment = Messages.showInputDialog(project, title + " Bug #" + bugId + "，可填写备注：", "禅道助手 - " + title, null, defaultComment, null);
             if (comment == null) return;
             String finalAssignee = assignee;
@@ -1448,6 +1615,1174 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             return text.contains("|") ? text.substring(text.lastIndexOf('|') + 1).trim() : text;
         }
 
+        private String combinePromptWithDiagnostics(String basePrompt, String diagnosticPackage) {
+            if (REPAIR_MODE_CLI.equals(selectedRepairMode())) {
+                return cliFastExecutionProtocol() + "\n\n"
+                        + diagnosticPackage + "\n\n"
+                        + "---\n\n"
+                        + basePrompt;
+            }
+            return basePrompt + "\n\n---\n\n" + diagnosticPackage;
+        }
+
+        private static String cliFastExecutionProtocol() {
+            return "【CLI快速修复协议】\n"
+                    + "你正在 Cursor Agent CLI/headless 模式中修复禅道 Bug。CLI 比聊天窗口更容易过度搜索，所以必须按以下策略执行：\n"
+                    + "1. 先阅读本文件里的【AI诊断包】，优先使用“疑似相关文件候选”“代码命中证据”“当前编辑器上下文”和本地截图路径。\n"
+                    + "2. 首轮定位最多读取 6 个候选文件，最多追加 8 次 grep/glob；不要先做全仓库泛搜索。\n"
+                    + "3. 不要重复搜索同一组关键词；不要搜索 button/page/bug/error/null/http/image/video 等泛词。\n"
+                    + "4. 如果诊断包已经给出足够候选文件，直接在这些文件里做最小修复，不要继续扩大搜索范围。\n"
+                    + "5. 只有候选文件全部无法解释 Bug 时，才追加小范围搜索，并在输出里说明为什么需要扩大范围。\n"
+                    + "6. 目标是快速完成最小可信修复：定位根因、改最少文件、给出验证方式和剩余风险。";
+        }
+
+        private String buildWorkflowCommentDraft(String bugId, String action) {
+            if ("activate".equals(action)) {
+                return "重新激活，请继续处理。";
+            }
+            if (!"resolve".equals(action) && !"close".equals(action)) {
+                return "";
+            }
+            String cwd = project.getBasePath();
+            if (cwd == null || cwd.isBlank()) {
+                return "resolve".equals(action) ? "已修复，请验证。" : "已验证，关闭。";
+            }
+
+            String branch = oneLine(runGit(cwd, "rev-parse", "--abbrev-ref", "HEAD"));
+            String diffNames = runGit(cwd, "diff", "--name-only", "HEAD", "--");
+            String shortstat = runGit(cwd, "diff", "--shortstat", "HEAD", "--");
+            String status = runGit(cwd, "status", "--short");
+            String sessionPath = findLatestRepairSessionForBug(bugId);
+            List<String> verificationCommands = collectVerificationCommands(cwd);
+            List<String> fileCandidates = new ArrayList<>();
+            fileCandidates.addAll(splitLines(diffNames));
+            fileCandidates.addAll(parseGitStatusFiles(status));
+            List<String> files = uniqueStrings(fileCandidates).stream().limit(8).collect(Collectors.toList());
+            String fileText = files.isEmpty() ? "请补充改动文件" : String.join(", ", files);
+            String statText = oneLine(shortstat);
+            if (statText.isBlank()) {
+                statText = files.isEmpty() ? "未检测到 Git 改动" : files.size() + " 个文件有改动";
+            }
+            String actionText = "resolve".equals(action) ? "已修复，请验证" : "已验证，关闭";
+            String verificationText = verificationCommands.isEmpty()
+                    ? "请补充已执行命令/结果"
+                    : verificationCommands.stream().limit(3).collect(Collectors.joining(" / "));
+            String sessionText = sessionPath.isBlank() ? "" : "；AI会话包：" + sessionPath;
+            return "【AI修复回写】Bug #" + bugId + " " + actionText
+                    + "；分支：" + (branch.isBlank() ? "未知" : branch)
+                    + "；改动文件：" + fileText
+                    + "；变更统计：" + statText
+                    + "；验证建议：" + verificationText
+                    + "；验证结果：请补充已执行命令/结果"
+                    + "；风险：请补充剩余风险"
+                    + sessionText + "。";
+        }
+
+        private String findLatestRepairSessionForBug(String bugId) {
+            String safeId = bugId == null ? "" : bugId.replaceAll("[^A-Za-z0-9._-]", "_");
+            List<Path> candidates = new ArrayList<>();
+            for (Path dir : repairSessionSearchDirs()) {
+                if (!Files.isDirectory(dir)) continue;
+                try (java.util.stream.Stream<Path> paths = Files.list(dir)) {
+                    paths.filter(Files::isRegularFile)
+                            .filter(path -> path.getFileName().toString().endsWith(".md"))
+                            .filter(path -> isRepairSessionForBug(path, bugId, safeId))
+                            .forEach(candidates::add);
+                } catch (Exception ignored) {
+                    // ignore missing or unreadable session directories
+                }
+            }
+            return candidates.stream()
+                    .sorted((left, right) -> {
+                        try {
+                            return Files.getLastModifiedTime(right).compareTo(Files.getLastModifiedTime(left));
+                        } catch (Exception ignored) {
+                            return 0;
+                        }
+                    })
+                    .map(path -> path.toAbsolutePath().toString())
+                    .findFirst()
+                    .orElse("");
+        }
+
+        private static boolean isRepairSessionForBug(Path path, String bugId, String safeId) {
+            String fileName = path.getFileName().toString();
+            if (!safeId.isBlank() && (fileName.contains("bug-" + safeId) || fileName.contains("bugs-" + safeId))) {
+                return true;
+            }
+            try {
+                String content = Files.readString(path, StandardCharsets.UTF_8);
+                String preview = content.length() > 4096 ? content.substring(0, 4096) : content;
+                return preview.contains("#" + bugId) || preview.contains("Bug编号：" + bugId);
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private String collectWorkspaceDiagnosticPackage(List<BugDetail> details) {
+            String bugIds = details.stream().map(detail -> "#" + detail.id).collect(Collectors.joining(", "));
+            int imageCount = details.stream().mapToInt(detail -> detail.promptImages == null ? 0 : detail.promptImages.size()).sum();
+            List<String> lines = new ArrayList<>();
+            lines.add("【AI诊断包】");
+            lines.add("Bug 范围：" + (bugIds.isBlank() ? "未提供" : bugIds));
+            lines.add("本地截图数量：" + imageCount);
+            lines.add("目标：请先用本诊断包判断可能影响范围，再改代码；不要只根据 Bug 文本猜测。");
+
+            String cwd = project.getBasePath();
+            if (cwd == null || cwd.isBlank()) {
+                AiContextReview contextReview = buildAiContextReview(false, imageCount, List.of(), List.of(), List.of(), List.of(), List.of());
+                lines.add("");
+                lines.add("AI 上下文质量：");
+                lines.add(formatAiContextReview(contextReview));
+                lines.add("");
+                lines.add("工作区：未打开 IntelliJ 项目目录，无法附加仓库上下文。");
+                lines.add("");
+                lines.add("建议验证：");
+                lines.add("- 根据项目实际技术栈运行相关单元测试、构建或冒烟流程。");
+                return String.join("\n", lines);
+            }
+
+            String branch = oneLine(runGit(cwd, "rev-parse", "--abbrev-ref", "HEAD"));
+            String status = runGit(cwd, "status", "--short");
+            String recentCommits = runGit(cwd, "log", "-5", "--oneline", "--decorate");
+            String editorWorkspaceFiles = collectEditorWorkspaceFiles(cwd);
+            List<String> trackedFileList = new ArrayList<>(splitLines(editorWorkspaceFiles));
+            if (trackedFileList.isEmpty() || trackedFileList.size() >= MAX_EDITOR_WORKSPACE_FILES) {
+                trackedFileList.addAll(splitLines(collectWorkspaceFiles(cwd)));
+            }
+            String trackedFiles = String.join("\n", uniqueStrings(trackedFileList));
+            List<String> changedFiles = collectChangedFiles(cwd, status).stream().limit(24).collect(Collectors.toList());
+            List<String> relevantFiles = rankRelevantFiles(trackedFiles, details, changedFiles).stream().limit(16).collect(Collectors.toList());
+            List<String> codeEvidence = collectCodeEvidence(cwd, collectBugSearchTerms(details).stream().limit(8).collect(Collectors.toList()), relevantFiles);
+            List<String> verificationCommands = collectVerificationCommands(cwd);
+            List<String> activeEditorContext = collectActiveEditorContext(cwd);
+            AiContextReview contextReview = buildAiContextReview(
+                    true,
+                    imageCount,
+                    activeEditorContext,
+                    relevantFiles,
+                    codeEvidence,
+                    verificationCommands,
+                    splitLines(recentCommits)
+            );
+
+            lines.add("");
+            lines.add("AI 上下文质量：");
+            lines.add(formatAiContextReview(contextReview));
+            lines.add("");
+            lines.add("仓库上下文：");
+            lines.add("- 工作区：" + cwd);
+            lines.add("- Git 分支：" + (branch.isBlank() ? "未知" : branch));
+            lines.add("");
+            lines.add("当前改动文件：");
+            lines.add(formatBulletList(changedFiles, "工作区暂无未提交文件"));
+            lines.add("");
+            lines.add("当前编辑器上下文：");
+            lines.add(formatBlockList(activeEditorContext, "未检测到当前工作区内的活动代码文件或选区"));
+            lines.add("");
+            lines.add("最近提交：");
+            lines.add(formatBulletList(splitLines(recentCommits).stream().limit(5).collect(Collectors.toList()), "无法读取最近提交"));
+            lines.add("");
+            lines.add("疑似相关文件候选：");
+            lines.add(formatBulletList(relevantFiles, "未能从 Bug 文本匹配到候选文件，请先用全文搜索定位模块"));
+            lines.add("");
+            lines.add("代码命中证据：");
+            lines.add(formatBulletList(codeEvidence, "未从仓库内容命中 Bug 关键词，建议 AI 先使用全文搜索定位"));
+            lines.add("");
+            lines.add("推荐验证命令：");
+            lines.add(formatBulletList(verificationCommands, "未识别到项目验证命令，请根据项目技术栈补充"));
+            lines.add("");
+            lines.add("建议验证清单：");
+            lines.add("- 优先运行与候选文件/模块相关的最小测试。");
+            lines.add("- 若没有测试，至少运行项目构建或类型检查。");
+            lines.add("- 修复后说明根因、关键改动、验证命令和剩余风险。");
+            lines.add("- 如果需要回写禅道备注，请包含根因、改动文件、验证结果和风险说明。");
+            return String.join("\n", lines);
+        }
+
+        private List<String> collectActiveEditorContext(String cwd) {
+            Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+            if (editor == null) return List.of();
+
+            Document document = editor.getDocument();
+            VirtualFile file = FileDocumentManager.getInstance().getFile(document);
+            if (file == null || !file.isInLocalFileSystem()) return List.of();
+
+            Path root = Path.of(cwd).toAbsolutePath().normalize();
+            Path filePath = Path.of(file.getPath()).toAbsolutePath().normalize();
+            if (!filePath.startsWith(root)) return List.of();
+
+            String relativePath = root.relativize(filePath).toString().replace('\\', '/');
+            int lineCount = document.getLineCount();
+            if (lineCount <= 0) return List.of();
+
+            boolean hasSelection = editor.getSelectionModel().hasSelection();
+            int startLine;
+            int endLine;
+            if (hasSelection) {
+                int selectionStart = editor.getSelectionModel().getSelectionStart();
+                int selectionEnd = editor.getSelectionModel().getSelectionEnd();
+                startLine = document.getLineNumber(selectionStart);
+                endLine = document.getLineNumber(Math.max(selectionStart, selectionEnd - 1));
+            } else {
+                int caretLine = editor.getCaretModel().getLogicalPosition().line;
+                startLine = Math.max(0, caretLine - 40);
+                endLine = Math.min(lineCount - 1, caretLine + 40);
+            }
+
+            int cappedEndLine = Math.min(endLine, startLine + 119);
+            String snippet = formatDocumentLines(document, startLine, cappedEndLine);
+            if (snippet.isBlank()) return List.of();
+
+            List<String> result = new ArrayList<>();
+            result.add("文件：" + relativePath);
+            result.add((hasSelection ? "选区" : "光标附近") + "：第 " + (startLine + 1) + "-" + (cappedEndLine + 1) + " 行");
+            result.add("```" + languageFromFile(relativePath));
+            result.add(snippet);
+            result.add("```");
+            return result;
+        }
+
+        private List<String> collectCodeEvidence(String cwd, List<String> terms, List<String> candidateFiles) {
+            List<String> evidence = new ArrayList<>();
+            for (String term : terms) {
+                if (evidence.size() >= 20) break;
+                if (!isUsefulSearchTerm(term) || COMMON_BUG_TERMS.contains(term)) continue;
+                List<String> candidateEvidence = collectCandidateCodeEvidence(cwd, term, candidateFiles);
+                for (String line : candidateEvidence) {
+                    evidence.add(line);
+                    if (evidence.size() >= 20) break;
+                }
+                if (!candidateEvidence.isEmpty()) continue;
+                String result = runGit(cwd, "grep", "-n", "-I", "-i", "-e", term, "--", ".");
+                if (result.isBlank()) {
+                    result = runCommand(cwd, 8, "rg",
+                            "--line-number",
+                            "--ignore-case",
+                            "--fixed-strings",
+                            "--glob",
+                            "!{.git,.svn,Library,Temp,UserSettings,workspace,writable,simulator,obj,Logs,AssetBundles,AssetBundles_Back}/**",
+                            term
+                    );
+                }
+                for (String line : splitLines(result).stream().limit(4).collect(Collectors.toList())) {
+                    String normalized = line.length() > 220 ? line.substring(0, 217) + "..." : line;
+                    evidence.add(term + ": " + normalized);
+                    if (evidence.size() >= 20) break;
+                }
+            }
+            return uniqueStrings(evidence);
+        }
+
+        private List<String> collectCandidateCodeEvidence(String cwd, String term, List<String> candidateFiles) {
+            if (candidateFiles == null || candidateFiles.isEmpty()) return List.of();
+            List<String> evidence = new ArrayList<>();
+            String lowerTerm = term.toLowerCase(Locale.ROOT);
+            Path root = Path.of(cwd).toAbsolutePath().normalize();
+            for (String file : candidateFiles.stream().limit(MAX_CANDIDATE_EVIDENCE_FILES).collect(Collectors.toList())) {
+                if (evidence.size() >= 4 || !isTextEvidenceFile(file)) continue;
+                try {
+                    Path path = root.resolve(file).normalize();
+                    if (!path.startsWith(root) || !Files.isRegularFile(path) || Files.size(path) > MAX_CANDIDATE_EVIDENCE_BYTES) continue;
+                    List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+                    for (int index = 0; index < lines.size() && evidence.size() < 4; index++) {
+                        String line = lines.get(index);
+                        if (line.toLowerCase(Locale.ROOT).contains(lowerTerm)) {
+                            String normalized = line.trim();
+                            if (normalized.length() > 180) normalized = normalized.substring(0, 177) + "...";
+                            evidence.add(term + ": " + file.replace('\\', '/') + ":" + (index + 1) + ":" + normalized);
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            return evidence;
+        }
+
+        private static boolean isUsefulSearchTerm(String term) {
+            if (term == null || term.isBlank()) return false;
+            if (Pattern.compile("\\p{IsHan}").matcher(term).find()) {
+                return term.length() >= 2;
+            }
+            return term.length() >= 4;
+        }
+
+        private static boolean isTextEvidenceFile(String file) {
+            if (file == null) return false;
+            return Pattern.compile("(?i).*\\.(ts|tsx|js|jsx|java|kt|cs|lua|py|go|rs|cpp|c|h|hpp|json|xml|md|txt|yml|yaml|ini|cfg|shader|cginc)$").matcher(file).matches();
+        }
+
+        private static boolean isIgnoredWorkspaceRelativePath(String file) {
+            if (file == null || file.isBlank()) return true;
+            String normalized = file.replace('\\', '/');
+            return normalized.startsWith(".git/")
+                    || normalized.startsWith(".svn/")
+                    || normalized.startsWith("Library/")
+                    || normalized.startsWith("Temp/")
+                    || normalized.startsWith("UserSettings/")
+                    || normalized.startsWith("workspace/")
+                    || normalized.startsWith("writable/")
+                    || normalized.startsWith("simulator/")
+                    || normalized.startsWith("obj/")
+                    || normalized.startsWith("Logs/")
+                    || normalized.startsWith("AssetBundles/")
+                    || normalized.startsWith("AssetBundles_Back/");
+        }
+
+        private static List<String> collectVerificationCommands(String cwd) {
+            List<String> commands = new ArrayList<>();
+
+            if (hasFile(cwd, "package.json")) {
+                try {
+                    String packageJson = Files.readString(Path.of(cwd, "package.json"), StandardCharsets.UTF_8);
+                    String packageManager = packageManager(cwd);
+                    if (hasPackageScript(packageJson, "test")) commands.add(packageScriptCommand(packageManager, "test"));
+                    if (hasPackageScript(packageJson, "typecheck")) commands.add(packageScriptCommand(packageManager, "typecheck"));
+                    if (hasPackageScript(packageJson, "check")) commands.add(packageScriptCommand(packageManager, "check"));
+                    if (hasPackageScript(packageJson, "lint")) commands.add(packageScriptCommand(packageManager, "lint"));
+                    if (hasPackageScript(packageJson, "build")) commands.add(packageScriptCommand(packageManager, "build"));
+                } catch (Exception ignored) {
+                    commands.add("npm test");
+                }
+            }
+
+            if (hasFile(cwd, "build.bat")) commands.add("build.bat");
+            if (hasFile(cwd, "gradlew.bat")) commands.add("gradlew.bat test");
+            if (hasFile(cwd, "gradlew")) commands.add("./gradlew test");
+            if (hasFile(cwd, "pom.xml")) commands.add("mvn test");
+            if (hasFile(cwd, "go.mod")) commands.add("go test ./...");
+            if (hasFile(cwd, "Cargo.toml")) commands.add("cargo test");
+            if (hasFile(cwd, "pyproject.toml") || hasFile(cwd, "pytest.ini")) commands.add("pytest");
+            if (hasFile(cwd, "ProjectSettings/ProjectVersion.txt")) commands.add("Unity Test Runner: EditMode/PlayMode tests");
+            if (hasSolutionFile(cwd)) commands.add("dotnet test");
+
+            return uniqueStrings(commands).stream().limit(8).collect(Collectors.toList());
+        }
+
+        private static boolean hasFile(String cwd, String relativePath) {
+            try {
+                return Files.exists(Path.of(cwd, relativePath));
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private static boolean hasSolutionFile(String cwd) {
+            try (java.util.stream.Stream<Path> entries = Files.list(Path.of(cwd))) {
+                return entries.anyMatch(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".sln"));
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private static boolean hasPackageScript(String packageJson, String scriptName) {
+            return Pattern.compile("\"" + Pattern.quote(scriptName) + "\"\\s*:").matcher(packageJson).find();
+        }
+
+        private static String packageManager(String cwd) {
+            if (hasFile(cwd, "pnpm-lock.yaml")) return "pnpm";
+            if (hasFile(cwd, "yarn.lock")) return "yarn";
+            return "npm";
+        }
+
+        private static String packageScriptCommand(String packageManager, String scriptName) {
+            if ("pnpm".equals(packageManager) || "yarn".equals(packageManager)) {
+                return packageManager + " " + scriptName;
+            }
+            return "test".equals(scriptName) ? "npm test" : "npm run " + scriptName;
+        }
+
+        private static AiContextReview buildAiContextReview(
+                boolean workspaceAttached,
+                int imageCount,
+                List<String> activeEditorContext,
+                List<String> relevantFiles,
+                List<String> codeEvidence,
+                List<String> verificationCommands,
+                List<String> recentCommits
+        ) {
+            int score = 0;
+            List<String> signals = new ArrayList<>();
+            List<String> gaps = new ArrayList<>();
+
+            if (workspaceAttached) {
+                score += 20;
+                signals.add("已附加当前工程路径和 Git 分支");
+            } else {
+                gaps.add("未打开工程目录，AI 无法获得仓库上下文");
+            }
+
+            if (relevantFiles != null && !relevantFiles.isEmpty()) {
+                score += 20;
+                signals.add("已给出 " + relevantFiles.size() + " 个疑似相关文件候选");
+            } else {
+                gaps.add("缺少疑似相关文件，建议先用全文搜索定位模块");
+            }
+
+            if (activeEditorContext != null && !activeEditorContext.isEmpty()) {
+                score += 10;
+                signals.add("已附加当前编辑器文件/选区上下文");
+            } else {
+                gaps.add("未附加当前编辑器上下文；若已打开相关代码，可选中关键片段后再发送");
+            }
+
+            if (codeEvidence != null && !codeEvidence.isEmpty()) {
+                score += 25;
+                signals.add("已命中 " + codeEvidence.size() + " 条代码证据");
+            } else {
+                gaps.add("缺少代码命中证据，AI 需要先自行搜索再判断改动点");
+            }
+
+            if (verificationCommands != null && !verificationCommands.isEmpty()) {
+                score += 15;
+                signals.add("已识别 " + verificationCommands.size() + " 条可运行验证命令");
+            } else {
+                gaps.add("未识别验证命令，建议补充构建、测试或冒烟入口");
+            }
+
+            if (imageCount > 0) {
+                score += 10;
+                signals.add("已附加 " + imageCount + " 张本地截图");
+            } else {
+                gaps.add("禅道未提供截图，AI 将主要依赖文本和代码证据");
+            }
+
+            if (recentCommits != null && !recentCommits.isEmpty()) {
+                score += 10;
+                signals.add("已附加最近提交，便于判断近期改动影响");
+            } else {
+                gaps.add("无法读取最近提交，缺少近期变更背景");
+            }
+
+            int normalizedScore = Math.min(score, 100);
+            String label = normalizedScore >= 85 ? "高可信" : normalizedScore >= 65 ? "可用" : normalizedScore >= 45 ? "偏弱" : "不足";
+            return new AiContextReview(
+                    normalizedScore,
+                    label,
+                    signals.isEmpty() ? List.of("暂无强上下文信号") : signals,
+                    gaps.isEmpty() ? List.of("暂无明显缺口") : gaps
+            );
+        }
+
+        private static String formatAiContextReview(AiContextReview review) {
+            return "- 评分：" + review.score + "/100（" + review.label + "）"
+                    + "\n- 已具备：" + String.join("；", review.signals)
+                    + "\n- 待补强：" + String.join("；", review.gaps);
+        }
+
+        private String runGit(String cwd, String... args) {
+            List<String> command = new ArrayList<>();
+            command.add("git");
+            command.addAll(List.of(args));
+            return runCommand(cwd, 5, command.toArray(new String[0]));
+        }
+
+        private String runCommand(String cwd, int timeoutSeconds, String... args) {
+            try {
+                Process process = new ProcessBuilder(List.of(args))
+                        .directory(Path.of(cwd).toFile())
+                        .redirectErrorStream(true)
+                        .start();
+                if (!process.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    return "";
+                }
+                if (process.exitValue() != 0) return "";
+                return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            } catch (Exception ignored) {
+                return "";
+            }
+        }
+
+        private String collectWorkspaceFiles(String cwd) {
+            String gitFiles = runGit(cwd, "ls-files");
+            if (!splitLines(gitFiles).isEmpty()) {
+                return gitFiles;
+            }
+            return runCommand(cwd, 12, "rg",
+                    "--files",
+                    "--hidden",
+                    "--glob",
+                    "!{.git,.svn,Library,Temp,UserSettings,workspace,writable,simulator,obj,Logs,AssetBundles,AssetBundles_Back}/**"
+            );
+        }
+
+        private String collectEditorWorkspaceFiles(String cwd) {
+            List<String> files = new ArrayList<>();
+            try {
+                Path root = Path.of(cwd).toRealPath();
+                ProjectFileIndex index = ProjectFileIndex.getInstance(project);
+                index.iterateContent(file -> {
+                    if (files.size() >= MAX_EDITOR_WORKSPACE_FILES) return false;
+                    if (file == null || file.isDirectory()) return true;
+                    try {
+                        Path path = Path.of(file.getPath()).toRealPath();
+                        if (!path.startsWith(root)) return true;
+                        String relative = root.relativize(path).toString().replace('\\', '/');
+                        if (!relative.isBlank() && !isIgnoredWorkspaceRelativePath(relative)) {
+                            files.add(relative);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    return true;
+                });
+            } catch (Exception ignored) {
+                return "";
+            }
+            return String.join("\n", uniqueStrings(files));
+        }
+
+        private List<String> collectChangedFiles(String cwd, String gitStatus) {
+            List<String> gitFiles = parseGitStatusFiles(gitStatus);
+            if (!gitFiles.isEmpty()) {
+                return gitFiles;
+            }
+            return parseSvnStatusFiles(runCommand(cwd, 8, "svn", "status"));
+        }
+
+        private static List<String> parseGitStatusFiles(String status) {
+            List<String> files = new ArrayList<>();
+            for (String line : splitLines(status)) {
+                String file = line.length() > 3 ? line.substring(3).trim() : line.trim();
+                if (file.contains(" -> ")) {
+                    file = file.substring(file.lastIndexOf(" -> ") + 4).trim();
+                }
+                if (!file.isBlank()) files.add(file);
+            }
+            return files;
+        }
+
+        private static List<String> parseSvnStatusFiles(String status) {
+            List<String> files = new ArrayList<>();
+            for (String line : splitLines(status)) {
+                String file = line.length() > 8 ? line.substring(8).trim() : "";
+                if (!file.isBlank() && !file.startsWith(".cursor") && !file.startsWith("UserSettings")) {
+                    files.add(file.replace('\\', '/'));
+                }
+            }
+            return files;
+        }
+
+        private static List<String> rankRelevantFiles(String trackedFiles, List<BugDetail> details, List<String> changedFiles) {
+            Set<String> terms = collectBugSearchTerms(details);
+            Set<String> changed = new LinkedHashSet<>(changedFiles);
+            return splitLines(trackedFiles).stream()
+                    .map(file -> new FileScore(file, scoreFile(file, terms, changed.contains(file))))
+                    .filter(item -> item.score > 0)
+                    .sorted((left, right) -> {
+                        int scoreCompare = Integer.compare(right.score, left.score);
+                        return scoreCompare != 0 ? scoreCompare : left.file.compareTo(right.file);
+                    })
+                    .map(item -> item.file)
+                    .collect(Collectors.toList());
+        }
+
+        private static Set<String> collectBugSearchTerms(List<BugDetail> details) {
+            Set<String> terms = new LinkedHashSet<>();
+            Pattern pattern = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]{2,}");
+            Pattern hanPattern = Pattern.compile("\\p{IsHan}{2,}");
+            for (BugDetail detail : details) {
+                String source = String.join(" ", List.of(
+                        nullToEmpty(detail.id),
+                        nullToEmpty(detail.title),
+                        nullToEmpty(detail.description),
+                        nullToEmpty(detail.reproduceSteps),
+                        nullToEmpty(detail.expectedResult),
+                        nullToEmpty(detail.actualResult)
+                ));
+                Matcher matcher = pattern.matcher(source);
+                while (matcher.find()) {
+                    String value = matcher.group().toLowerCase(Locale.ROOT);
+                    if (!COMMON_BUG_TERMS.contains(value)) terms.add(value);
+                }
+                Matcher hanMatcher = hanPattern.matcher(source);
+                while (hanMatcher.find()) {
+                    String value = hanMatcher.group();
+                    if (!COMMON_BUG_TERMS.contains(value)) {
+                        terms.add(value.length() <= 10 ? value : value.substring(0, 10));
+                    }
+                    int maxSize = Math.min(4, value.length());
+                    for (int size = 2; size <= maxSize; size++) {
+                        for (int index = 0; index + size <= value.length(); index++) {
+                            String token = value.substring(index, index + size);
+                            if (!COMMON_BUG_TERMS.contains(token)) {
+                                terms.add(token);
+                            }
+                            if (terms.size() >= 40) return terms;
+                        }
+                    }
+                }
+            }
+            return terms;
+        }
+
+        private static int scoreFile(String file, Set<String> terms, boolean changed) {
+            String normalized = file.toLowerCase(Locale.ROOT);
+            int score = changed ? 20 : 0;
+            for (String term : terms) {
+                if (normalized.contains(term)) {
+                    score += term.length() > 5 ? 8 : 4;
+                }
+            }
+            if (file.matches("(?i).*\\.(ts|tsx|js|jsx|java|kt|cs|lua|py|go|rs|cpp|h|hpp)$")) {
+                score += 2;
+            }
+            if (file.matches("(?i).*(test|spec|__tests__|tests?).*")) {
+                score += 1;
+            }
+            return score;
+        }
+
+        private static List<String> splitLines(String value) {
+            if (value == null || value.isBlank()) return List.of();
+            return Pattern.compile("\\R").splitAsStream(value)
+                    .map(String::trim)
+                    .filter(line -> !line.isBlank())
+                    .collect(Collectors.toList());
+        }
+
+        private static String formatBulletList(List<String> items, String fallback) {
+            if (items == null || items.isEmpty()) return "- " + fallback;
+            return items.stream().map(item -> "- " + item).collect(Collectors.joining("\n"));
+        }
+
+        private static String formatBlockList(List<String> items, String fallback) {
+            if (items == null || items.isEmpty()) return "- " + fallback;
+            return String.join("\n", items);
+        }
+
+        private static String formatDocumentLines(Document document, int startLine, int endLine) {
+            List<String> lines = new ArrayList<>();
+            for (int index = startLine; index <= endLine; index++) {
+                int startOffset = document.getLineStartOffset(index);
+                int endOffset = document.getLineEndOffset(index);
+                String line = document.getCharsSequence().subSequence(startOffset, endOffset).toString();
+                lines.add(String.format(Locale.ROOT, "%4d: %s", index + 1, line));
+            }
+            String value = String.join("\n", lines);
+            return value.length() > 12000 ? value.substring(0, 12000) + "\n..." : value;
+        }
+
+        private static String languageFromFile(String file) {
+            String lower = file == null ? "" : file.toLowerCase(Locale.ROOT);
+            if (lower.endsWith(".ts")) return "typescript";
+            if (lower.endsWith(".tsx")) return "tsx";
+            if (lower.endsWith(".js")) return "javascript";
+            if (lower.endsWith(".jsx")) return "jsx";
+            if (lower.endsWith(".java")) return "java";
+            if (lower.endsWith(".kt")) return "kotlin";
+            if (lower.endsWith(".cs")) return "csharp";
+            if (lower.endsWith(".lua")) return "lua";
+            if (lower.endsWith(".py")) return "python";
+            if (lower.endsWith(".go")) return "go";
+            if (lower.endsWith(".rs")) return "rust";
+            if (lower.endsWith(".cpp") || lower.endsWith(".h") || lower.endsWith(".hpp")) return "cpp";
+            if (lower.endsWith(".json")) return "json";
+            if (lower.endsWith(".xml")) return "xml";
+            if (lower.endsWith(".md")) return "markdown";
+            return "";
+        }
+
+        private static List<String> uniqueStrings(List<String> items) {
+            if (items == null || items.isEmpty()) return List.of();
+            return items.stream()
+                    .map(String::trim)
+                    .filter(item -> !item.isBlank())
+                    .distinct()
+                    .collect(Collectors.toList());
+        }
+
+        private static String oneLine(String value) {
+            List<String> lines = splitLines(value);
+            return lines.isEmpty() ? "" : lines.get(0);
+        }
+
+        private static String nullToEmpty(String value) {
+            return value == null ? "" : value;
+        }
+
+        private Path sendPromptForRepair(String prompt, List<String> bugIds) throws Exception {
+            Path sessionFile = writeRepairSessionPackage(prompt, bugIds);
+            if (REPAIR_MODE_CLI.equals(selectedRepairMode())) {
+                sendPromptToCli(prompt, bugIds, sessionFile);
+                return sessionFile;
+            }
+            sendToClaudeCode(prompt);
+            return sessionFile;
+        }
+
+        private void sendPromptToCli(String prompt, List<String> bugIds, Path promptFile) throws Exception {
+            String command = buildCliCommand(promptFile, bugIds);
+            putPromptOnClipboard(command);
+            if (openTerminalAndPasteCommand(command)) {
+                setStatus("CLI 命令已发送到 Terminal，AI 修复会话包：" + promptFile);
+                return;
+            }
+            Messages.showInfoMessage(project, "CLI 命令已复制到剪贴板，请在终端执行。\n\nAI 修复会话包：" + promptFile, "禅道助手");
+        }
+
+        private Path writeRepairSessionPackage(String prompt, List<String> bugIds) throws Exception {
+            Path dir = repairSessionWriteDir();
+            Files.createDirectories(dir);
+            String idPart = bugIds == null || bugIds.isEmpty()
+                    ? "bugs"
+                    : String.join("-", bugIds).replaceAll("[^A-Za-z0-9._-]", "_");
+            if (idPart.length() > 80) {
+                idPart = idPart.substring(0, 80);
+            }
+            String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+            String prefix = bugIds == null || bugIds.size() <= 1 ? "bug-" : "bugs-";
+            Path promptFile = dir.resolve(stamp + "-" + prefix + idPart + "-session.md");
+            String ids = bugIds == null || bugIds.isEmpty()
+                    ? "unknown"
+                    : bugIds.stream().map(id -> "#" + id).collect(Collectors.joining(", "));
+            String workspace = project.getBasePath() == null || project.getBasePath().isBlank() ? "未打开项目目录" : project.getBasePath();
+            String content = "# ZenTao AI Repair Session\n\n"
+                    + "- Created: " + java.time.OffsetDateTime.now() + "\n"
+                    + "- Bugs: " + ids + "\n"
+                    + "- Target: " + selectedRepairTargetLabel() + "\n"
+                    + "- Engine: claudeCode\n"
+                    + "- Repair Mode: " + selectedRepairMode() + "\n"
+                    + "- Workspace: " + workspace + "\n\n"
+                    + "---\n\n"
+                    + "## Prompt\n\n"
+                    + (prompt == null ? "" : prompt);
+            Files.writeString(promptFile, content, StandardCharsets.UTF_8);
+            return promptFile;
+        }
+
+        private Path workspaceRepairTempRoot() {
+            String basePath = project.getBasePath();
+            if (basePath == null || basePath.isBlank()) {
+                return null;
+            }
+            return Path.of(basePath, "zentao_bug_assistant");
+        }
+
+        private Path workspaceRepairSessionDir() {
+            Path tempRoot = workspaceRepairTempRoot();
+            return tempRoot == null ? null : tempRoot.resolve("repair-sessions");
+        }
+
+        private Path globalRepairSessionDir() {
+            return Path.of(PathManager.getSystemPath(), "zentao-bug-assistant", "repair-sessions");
+        }
+
+        private List<Path> repairSessionSearchDirs() {
+            List<Path> dirs = new ArrayList<>();
+            Path workspaceDir = workspaceRepairSessionDir();
+            if (workspaceDir != null) {
+                dirs.add(workspaceDir);
+            }
+            Path globalDir = globalRepairSessionDir();
+            if (dirs.stream().noneMatch(dir -> dir.equals(globalDir))) {
+                dirs.add(globalDir);
+            }
+            return dirs;
+        }
+
+        private Path repairSessionWriteDir() throws Exception {
+            Path workspaceDir = workspaceRepairSessionDir();
+            if (workspaceDir != null) {
+                ensureRepairTempReady();
+                return workspaceDir;
+            }
+            return globalRepairSessionDir();
+        }
+
+        private void ensureRepairTempReady() throws Exception {
+            Path tempRoot = workspaceRepairTempRoot();
+            if (tempRoot == null) {
+                return;
+            }
+            Files.createDirectories(tempRoot);
+        }
+
+        private String buildCliCommand(Path promptFile, List<String> bugIds) throws Exception {
+            String template = cliCommandTemplate();
+            if (template.isBlank()) {
+                if (isWindows()) {
+                    return defaultWindowsClaudeRunnerCommand(promptFile, writeClaudeCliRunner());
+                }
+                template = defaultCliCommandTemplate();
+            }
+            String ids = bugIds == null ? "" : String.join(",", bugIds);
+            return template
+                    .replace("{promptFile}", quotePathForShell(promptFile))
+                    .replace("{promptFileRaw}", promptFile.toAbsolutePath().toString())
+                    .replace("{bugIds}", ids)
+                    .replace("{engine}", "claudeCode");
+        }
+
+        private Path writeClaudeCliRunner() throws Exception {
+            Path tempRoot = workspaceRepairTempRoot();
+            Path root = tempRoot != null ? tempRoot : globalRepairSessionDir().getParent();
+            if (root == null) {
+                root = Path.of(PathManager.getSystemPath(), "zentao-bug-assistant");
+            }
+            Files.createDirectories(root);
+            Path runner = root.resolve("run-claude-agent.ps1");
+            Files.writeString(runner, "\uFEFF" + claudeCliRunnerPowerShell(), StandardCharsets.UTF_8);
+            return runner;
+        }
+
+        private String cliCommandTemplate() {
+            PropertiesComponent projectProperties = projectProperties();
+            String projectTemplate = projectProperties == null ? "" : projectProperties.getValue("zentao.idea.cliCommandTemplate", "");
+            if (projectTemplate != null && !projectTemplate.isBlank()) {
+                return projectTemplate.trim();
+            }
+            return PropertiesComponent.getInstance().getValue("zentao.idea.settings.cliCommandTemplate", "");
+        }
+
+        private static String defaultCliCommandTemplate() {
+            return isWindows()
+                    ? "Get-Content -Raw -LiteralPath {promptFile} | claude --print"
+                    : "claude -p --verbose --permission-mode acceptEdits --output-format stream-json --include-partial-messages < {promptFile}";
+        }
+
+        private static String defaultWindowsClaudeRunnerCommand(Path promptFile, Path runnerFile) {
+            return "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    + quotePathForShell(runnerFile)
+                    + " -PromptFile "
+                    + quotePathForShell(promptFile);
+        }
+
+        private static String claudeCliRunnerPowerShell() {
+            return String.join("\n",
+                    "param(",
+                    "  [Parameter(Mandatory=$true)]",
+                    "  [string]$PromptFile",
+                    ")",
+                    "$ProgressPreference = 'SilentlyContinue'",
+                    "$ErrorActionPreference = 'Stop'",
+                    "try {",
+                    "  $__ztUtf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false",
+                    "  [Console]::InputEncoding = $__ztUtf8",
+                    "  [Console]::OutputEncoding = $__ztUtf8",
+                    "  $OutputEncoding = $__ztUtf8",
+                    "  chcp 65001 > $null 2>$null",
+                    "} catch {",
+                    "}",
+                    "$__ztPromptFile = (Resolve-Path -LiteralPath $PromptFile).Path",
+                    "$__ztWorkspace = (Get-Location).Path",
+                    "$__ztInstruction = \"Read this exact UTF-8 Markdown file and execute the ZenTao bug-fix task described in it. File: $__ztPromptFile. If this exact file cannot be read, print CANNOT_READ and stop; do not use any other repair-session file.\"",
+                    "function Invoke-ZenTaoClaudeAgent {",
+                    "  param([string]$Instruction)",
+                    "  $state = @{ printed = $false; openLine = $false; busyLine = $false; busyFlag = ''; busyProcess = $null; lastText = ''; streamedText = ''; toolTotal = 0; toolSeen = @{}; toolParts = @{}; thinkingChars = 0; lastThinkingLog = 0 }",
+                    "  function Clear-BusyLine {",
+                    "    if (-not $state.busyLine) { return }",
+                    "    if ($state.busyFlag) { Remove-Item -LiteralPath $state.busyFlag -Force -ErrorAction SilentlyContinue }",
+                    "    if ($state.busyProcess) {",
+                    "      try {",
+                    "        [void]$state.busyProcess.WaitForExit(1000)",
+                    "        if (-not $state.busyProcess.HasExited) { $state.busyProcess.Kill() }",
+                    "      } catch {}",
+                    "      $state.busyProcess = $null",
+                    "    }",
+                    "    $state.busyFlag = ''",
+                    "    $width = 120",
+                    "    try { $width = [Math]::Max(80, [Console]::BufferWidth - 1) } catch {}",
+                    "    [Console]::Write([char]13 + (' ' * $width) + [char]13)",
+                    "    $state.busyLine = $false",
+                    "  }",
+                    "  function Show-BusyLine {",
+                    "    param([string]$Text = 'AI working')",
+                    "    if ($state.openLine -or $state.busyLine) { return }",
+                    "    $state.busyLine = $true",
+                    "    $state.busyFlag = [System.IO.Path]::GetTempFileName()",
+                    "    $safeFlag = $state.busyFlag.Replace(\"'\", \"''\")",
+                    "    $safeText = $Text.Replace(\"'\", \"''\")",
+                    "    $script = \"`$ProgressPreference='SilentlyContinue'; `$flag='$safeFlag'; `$text='$safeText'; `$start=Get-Date; `$i=0; while(Test-Path -LiteralPath `$flag){ `$elapsed=[int]((Get-Date)-`$start).TotalSeconds; `$dots='.' * ((`$i % 3)+1); [Console]::Write(([char]13 + ('{0} {1}s {2}   ' -f `$text, `$elapsed, `$dots))); Start-Sleep -Milliseconds 220; `$i++ }; try { `$width=[Math]::Max(80,[Console]::BufferWidth-1) } catch { `$width=120 }; [Console]::Write(([char]13 + (' ' * `$width) + [char]13))\"",
+                    "    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))",
+                    "    try {",
+                    "      $state.busyProcess = Start-Process powershell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-OutputFormat','Text','-EncodedCommand',$encoded) -NoNewWindow -PassThru",
+                    "    } catch {",
+                    "      [Console]::Write($Text + ' ... ')",
+                    "    }",
+                    "  }",
+                    "  function Shorten-Text {",
+                    "    param([string]$Value, [int]$Max = 120)",
+                    "    if (-not $Value) { return '' }",
+                    "    $text = ($Value -replace '\\s+', ' ').Trim()",
+                    "    if ($text.Length -le $Max) { return $text }",
+                    "    return $text.Substring(0, $Max - 3) + '...'",
+                    "  }",
+                    "  function Shorten-Path {",
+                    "    param([string]$Value)",
+                    "    if (-not $Value) { return '' }",
+                    "    $path = $Value",
+                    "    if ($path.StartsWith($__ztWorkspace, [System.StringComparison]::OrdinalIgnoreCase)) {",
+                    "      $path = $path.Substring($__ztWorkspace.Length).TrimStart([char]92, [char]47)",
+                    "    }",
+                    "    return Shorten-Text $path 140",
+                    "  }",
+                    "  function Input-Value {",
+                    "    param($InputObject, [string[]]$Names)",
+                    "    if (-not $InputObject) { return '' }",
+                    "    foreach ($name in $Names) {",
+                    "      if ($InputObject.PSObject.Properties.Name -contains $name) { return [string]$InputObject.PSObject.Properties[$name].Value }",
+                    "    }",
+                    "    return ''",
+                    "  }",
+                    "  function Tool-Summary {",
+                    "    param($Part)",
+                    "    $name = [string]$Part.name",
+                    "    $toolInput = $Part.input",
+                    "    $path = Input-Value $toolInput @('file_path', 'path')",
+                    "    $pattern = Input-Value $toolInput @('pattern', 'query', 'glob', 'regex')",
+                    "    $command = Input-Value $toolInput @('command', 'cmd')",
+                    "    if ($name -eq 'Read') { if ($path) { return 'Read ' + (Shorten-Path $path) }; return 'Read pending' }",
+                    "    if ($name -eq 'Grep') { if ($pattern) { return 'Grepped ' + (Shorten-Text $pattern 120) }; return 'Grepped pending' }",
+                    "    if ($name -eq 'Glob') { if ($pattern) { return 'Searched files ' + (Shorten-Text $pattern 120) }; return 'Searched files pending' }",
+                    "    if ($name -eq 'Edit' -or $name -eq 'MultiEdit' -or $name -eq 'Write') { return $name + ' ' + (Shorten-Path $path) }",
+                    "    if ($name -eq 'Bash') { return 'Ran ' + (Shorten-Text $command 120) }",
+                    "    if ($name) { return $name }",
+                    "    return 'Tool'",
+                    "  }",
+                    "  function Write-AssistantText {",
+                    "    param([string]$Text)",
+                    "    if (-not $Text) { return }",
+                    "    Clear-BusyLine",
+                    "    $shouldBreakBeforeDelta = $false",
+                    "    if ($state.lastText -and $Text.StartsWith($state.lastText)) {",
+                    "      $delta = $Text.Substring($state.lastText.Length)",
+                    "    } elseif ($state.streamedText -and $Text.StartsWith($state.streamedText)) {",
+                    "      $delta = $Text.Substring($state.streamedText.Length)",
+                    "    } elseif ($Text -eq $state.lastText) {",
+                    "      $delta = ''",
+                    "    } elseif ($state.streamedText -and $state.streamedText.EndsWith($Text)) {",
+                    "      $delta = ''",
+                    "    } elseif ($Text.Length -le 120 -and -not $Text.Contains(\"`n\")) {",
+                    "      $delta = $Text",
+                    "    } else {",
+                    "      $shouldBreakBeforeDelta = $true",
+                    "      $delta = $Text",
+                    "    }",
+                    "    if ($state.openLine -and $delta -match '^[\\r\\n\\s]+\\p{P}') {",
+                    "      $delta = $delta -replace '^[\\r\\n\\s]+', ''",
+                    "      $shouldBreakBeforeDelta = $false",
+                    "    }",
+                    "    if ($shouldBreakBeforeDelta -and $state.openLine) {",
+                    "      [Console]::WriteLine()",
+                    "      $state.openLine = $false",
+                    "    }",
+                    "    if ($delta) {",
+                    "      [Console]::Write($delta)",
+                    "      $state.printed = $true",
+                    "      $state.openLine = -not ($delta -match '[\\r\\n]$')",
+                    "      $state.streamedText += $delta",
+                    "      if (-not $state.openLine) { Show-BusyLine }",
+                    "    }",
+                    "    $state.lastText = $Text",
+                    "  }",
+                    "  function Write-ActivityLog {",
+                    "    param([string]$Text)",
+                    "    if (-not $Text) { return }",
+                    "    Clear-BusyLine",
+                    "    if ($state.openLine) { [Console]::WriteLine(); $state.openLine = $false }",
+                    "    Write-Host $Text -ForegroundColor DarkGray",
+                    "    Show-BusyLine",
+                    "  }",
+                    "  $__ztErrFile = [System.IO.Path]::GetTempFileName()",
+                    "  try {",
+                    "    Show-BusyLine 'Claude starting'",
+                    "    claude -p --verbose --permission-mode acceptEdits --output-format stream-json --include-partial-messages $Instruction 2> $__ztErrFile | ForEach-Object {",
+                    "      $line = [string]$_",
+                    "      try {",
+                    "        $event = $line | ConvertFrom-Json -ErrorAction Stop",
+                    "        if ($event.type -eq 'system' -and $event.subtype -eq 'init') {",
+                    "          Clear-BusyLine",
+                    "          Write-Host ('[Claude] model=' + $event.model + ' cwd=' + $event.cwd) -ForegroundColor DarkGray",
+                    "          Show-BusyLine 'Claude thinking'",
+                    "        } elseif ($event.type -eq 'stream_event') {",
+                    "          $inner = $event.event",
+                    "          if ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'text_delta') {",
+                    "            Write-AssistantText ([string]$inner.delta.text)",
+                    "          } elseif ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'thinking_delta') {",
+                    "            $state.thinkingChars = [int]$state.thinkingChars + ([string]$inner.delta.thinking).Length",
+                    "            if (($state.thinkingChars - [int]$state.lastThinkingLog) -ge 120) {",
+                    "              $state.lastThinkingLog = $state.thinkingChars",
+                    "              Write-ActivityLog ('Thinking... ' + $state.thinkingChars + ' chars')",
+                    "            }",
+                    "          } elseif ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'input_json_delta') {",
+                    "            $indexKey = [string]$inner.index",
+                    "            if ($state.toolParts.ContainsKey($indexKey)) {",
+                    "              $tool = $state.toolParts[$indexKey]",
+                    "              $tool.inputJson = [string]$tool.inputJson + [string]$inner.delta.partial_json",
+                    "              try {",
+                    "                $toolInput = $tool.inputJson | ConvertFrom-Json -ErrorAction Stop",
+                    "                $partObject = [pscustomobject]@{ name = $tool.name; input = $toolInput }",
+                    "                $detailKey = $tool.id + ':detail'",
+                    "                $detailSummary = Tool-Summary $partObject",
+                    "                if (-not $state.toolSeen.ContainsKey($detailKey)) {",
+                    "                  if ($detailSummary -notmatch 'pending$') {",
+                    "                    Write-ActivityLog $detailSummary",
+                    "                    $state.toolSeen[$detailKey] = $true",
+                    "                  }",
+                    "                }",
+                    "              } catch {}",
+                    "            }",
+                    "          } elseif ($inner.type -eq 'content_block_start' -and $inner.content_block -and $inner.content_block.type -eq 'tool_use') {",
+                    "            $indexKey = [string]$inner.index",
+                    "            $toolId = [string]$inner.content_block.id",
+                    "            if (-not $toolId) { $toolId = ([string]$inner.content_block.name) + ':' + $state.toolTotal }",
+                    "            $state.toolParts[$indexKey] = @{ id = $toolId; name = [string]$inner.content_block.name; inputJson = '' }",
+                    "            if (-not $state.toolSeen.ContainsKey($toolId)) {",
+                    "              $state.toolSeen[$toolId] = $true",
+                    "              $state.toolTotal = [int]$state.toolTotal + 1",
+                    "              Clear-BusyLine",
+                    "              if ($state.openLine) { [Console]::WriteLine(); $state.openLine = $false }",
+                    "              $busyText = 'Tool ' + [string]$inner.content_block.name",
+                    "              if (-not [string]$inner.content_block.name) { $busyText = 'AI working' }",
+                    "              Show-BusyLine $busyText",
+                    "            }",
+                    "          } elseif ($inner.type -eq 'message_start') {",
+                    "            if (-not $state.openLine) { Show-BusyLine 'Claude generating' }",
+                    "          }",
+                    "        } elseif ($event.type -eq 'assistant') {",
+                    "          foreach ($part in @($event.message.content)) {",
+                    "            if ($part.type -eq 'text' -and $part.text) {",
+                    "              Write-AssistantText ([string]$part.text)",
+                    "            } elseif ($part.type -eq 'tool_use') {",
+                    "              $toolId = [string]$part.id",
+                    "              if (-not $toolId) { $toolId = ([string]$part.name) + ':' + $state.toolTotal }",
+                    "              $summary = Tool-Summary $part",
+                    "              if (-not $state.toolSeen.ContainsKey($toolId)) {",
+                    "                $state.toolSeen[$toolId] = $true",
+                    "                $state.toolTotal = [int]$state.toolTotal + 1",
+                    "                if ($summary -notmatch 'pending$') { Write-ActivityLog $summary }",
+                    "              } elseif ($part.input) {",
+                    "                $detailKey = $toolId + ':detail'",
+                    "                if (-not $state.toolSeen.ContainsKey($detailKey)) {",
+                    "                  if ($summary -notmatch 'pending$') { Write-ActivityLog $summary }",
+                    "                  $state.toolSeen[$detailKey] = $true",
+                    "                }",
+                    "              }",
+                    "            }",
+                    "          }",
+                    "        } elseif ($event.type -eq 'result') {",
+                    "          Clear-BusyLine",
+                    "          if ($state.openLine) { [Console]::WriteLine(); $state.openLine = $false }",
+                    "          if (-not $state.printed -and $event.result) { Write-Host $event.result }",
+                    "          if ($state.toolTotal -gt 0) { Write-Host ('Tools total: ' + $state.toolTotal + ' calls') -ForegroundColor DarkGray }",
+                    "          if ($event.is_error) {",
+                    "            Write-Host ('[Claude] failed duration=' + $event.duration_ms + 'ms') -ForegroundColor Red",
+                    "          } else {",
+                    "            Write-Host ('[Claude] done duration=' + $event.duration_ms + 'ms') -ForegroundColor DarkGray",
+                    "          }",
+                    "        }",
+                    "      } catch {",
+                    "        if ($line -and -not $line.TrimStart().StartsWith('{')) {",
+                    "          Clear-BusyLine",
+                    "          if ($state.openLine) { [Console]::WriteLine(); $state.openLine = $false }",
+                    "          Write-Host $line",
+                    "        }",
+                    "      }",
+                    "    }",
+                    "    Clear-BusyLine",
+                    "    if ($state.openLine) { [Console]::WriteLine() }",
+                    "    $__ztExit = $LASTEXITCODE",
+                    "    if ($__ztExit -ne 0) {",
+                    "      $err = ''",
+                    "      try { $err = [System.IO.File]::ReadAllText($__ztErrFile, [System.Text.Encoding]::UTF8).Trim() } catch {}",
+                    "      if ($err) {",
+                    "        $lines = @($err -split '\\r?\\n' | Where-Object { $_ -and $_ -notmatch '^\\s*\\+ ' -and $_ -notmatch '^\\s*~' -and $_ -notmatch '^\\s*CategoryInfo' -and $_ -notmatch '^\\s*FullyQualifiedErrorId' } | Select-Object -First 8)",
+                    "        Write-Host '[Claude] error:' -ForegroundColor Red",
+                    "        Write-Host ($lines -join \"`n\") -ForegroundColor Red",
+                    "      }",
+                    "    }",
+                    "    return $__ztExit",
+                    "  } finally {",
+                    "    Clear-BusyLine",
+                    "    Remove-Item -LiteralPath $__ztErrFile -Force -ErrorAction SilentlyContinue",
+                    "  }",
+                    "}",
+                    "$__ztExitCode = Invoke-ZenTaoClaudeAgent $__ztInstruction",
+                    "if ($__ztExitCode -ne 0) {",
+                    "  Write-Host 'Claude failed; retrying once...' -ForegroundColor Yellow",
+                    "  Start-Sleep -Seconds 2",
+                    "  $__ztExitCode = Invoke-ZenTaoClaudeAgent $__ztInstruction",
+                    "}",
+                    "exit $__ztExitCode"
+            );
+        }
+
+        private static boolean isWindows() {
+            return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+        }
+
+        private static String quotePathForShell(Path path) {
+            String raw = path.toAbsolutePath().toString();
+            if (isWindows()) {
+                return "'" + raw.replace("'", "''") + "'";
+            }
+            return "'" + raw.replace("'", "'\"'\"'") + "'";
+        }
+
+        private static String quotePowerShellString(String value) {
+            return "'" + (value == null ? "" : value).replace("'", "''") + "'";
+        }
+
+        private static String encodePowerShellCommand(String command) {
+            return Base64.getEncoder().encodeToString(command.getBytes(StandardCharsets.UTF_16LE));
+        }
+
+        private boolean openTerminalAndPasteCommand(String command) {
+            try {
+                ToolWindow terminal = ToolWindowManager.getInstance(project).getToolWindow("Terminal");
+                if (terminal != null) {
+                    terminal.activate(() -> pasteCommandIntoTerminal(command), true);
+                    return true;
+                }
+            } catch (Throwable error) {
+                debugLog("terminal-toolwindow-failed", readableError(rootCause(error)));
+            }
+
+            ActionManager manager = ActionManager.getInstance();
+            for (String actionId : TERMINAL_ACTION_IDS) {
+                try {
+                    AnAction action = manager.getAction(actionId);
+                    if (action != null) {
+                        ZenTaoPlatformCompat.performAction(
+                                action,
+                                DataManager.getInstance().getDataContext(root),
+                                ActionPlaces.UNKNOWN
+                        );
+                        pasteCommandIntoTerminal(command);
+                        return true;
+                    }
+                } catch (Throwable error) {
+                    debugLog("terminal-action-failed", actionId + ": " + readableError(rootCause(error)));
+                }
+            }
+            return false;
+        }
+
+        private void pasteCommandIntoTerminal(String command) {
+            javax.swing.Timer timer = new javax.swing.Timer(1200, event -> {
+                ((javax.swing.Timer)event.getSource()).stop();
+                if (project.isDisposed()) return;
+                putPromptOnClipboard(command);
+                nativePastePrompt();
+                nativePressEnter();
+            });
+            timer.setRepeats(false);
+            timer.start();
+        }
+
+        private String selectedRepairMode() {
+            return repairModeBox.getSelectedIndex() == 1 ? REPAIR_MODE_CLI : REPAIR_MODE_CHAT;
+        }
+
+        private void setRepairMode(String mode) {
+            repairModeBox.setSelectedIndex(REPAIR_MODE_CLI.equals(mode) ? 1 : 0);
+        }
+
+        private String selectedRepairTargetLabel() {
+            return REPAIR_MODE_CLI.equals(selectedRepairMode()) ? "CLI" : "Claude Chat";
+        }
+
         private void sendToClaudeCode(String prompt) {
             putPromptOnClipboard(prompt);
             ActionManager manager = ActionManager.getInstance();
@@ -1467,7 +2802,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     debugLog("claude-action-failed", actionId + ": " + readableError(rootCause(error)));
                 }
             }
-            Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，请粘贴到 Claude Code with GUI。", "禅道助手");
+            Messages.showInfoMessage(project, "修复提示词已复制到剪贴板，请粘贴到 Claude Chat。", "禅道助手");
         }
 
         private void pastePromptIntoClaudeChat(String prompt) {
@@ -1511,6 +2846,17 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
+        private void nativePressEnter() {
+            try {
+                java.awt.Robot robot = new java.awt.Robot();
+                robot.setAutoDelay(40);
+                robot.keyPress(java.awt.event.KeyEvent.VK_ENTER);
+                robot.keyRelease(java.awt.event.KeyEvent.VK_ENTER);
+            } catch (Exception error) {
+                debugLog("terminal-enter-failed", error.getMessage());
+            }
+        }
+
         private void runKeepAlive() {
             if (project.isDisposed() || !client.loggedIn()) {
                 return;
@@ -1523,7 +2869,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                             return true;
                         }
                         if (canRetryLogin()) {
-                            client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                            client.login(serverField.getText(), accountField.getText(), resolvedPasswordForLogin());
                             return true;
                         }
                         return false;
@@ -1584,7 +2930,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return supplier.get();
             } catch (Exception error) {
                 if (!status.contains("登录") && isSessionExpiredError(error) && canRetryLogin()) {
-                    client.login(serverField.getText(), accountField.getText(), new String(passwordField.getPassword()));
+                    client.login(serverField.getText(), accountField.getText(), resolvedPasswordForLogin());
                     return supplier.get();
                 }
                 if (!retriedNetwork && isTransientNetworkError(error)) {
@@ -1609,6 +2955,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             if (status != null) setStatus(status);
             refreshButton.setEnabled(!value);
             clearImageCacheButton.setEnabled(!value);
+            aiEngineBox.setEnabled(!value);
+            repairModeBox.setEnabled(!value);
             boolean hasAiTargets = false;
             try {
                 hasAiTargets = !unresolved(filteredBugs()).isEmpty();
@@ -1776,7 +3124,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         }
 
         private boolean canRetryLogin() {
-            return !accountField.getText().isBlank() && passwordField.getPassword().length > 0;
+            return !accountField.getText().isBlank() && !resolvedPasswordForLogin().isBlank();
         }
 
         private static boolean isSessionExpiredError(Throwable error) {
@@ -2301,13 +3649,68 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
         }
 
+        private static final class FileScore {
+            final String file;
+            final int score;
+
+            FileScore(String file, int score) {
+                this.file = file;
+                this.score = score;
+            }
+        }
+
+        private static final class AiContextReview {
+            final int score;
+            final String label;
+            final List<String> signals;
+            final List<String> gaps;
+
+            AiContextReview(int score, String label, List<String> signals, List<String> gaps) {
+                this.score = score;
+                this.label = label;
+                this.signals = signals;
+                this.gaps = gaps;
+            }
+        }
+
         private static final class PromptBuilder {
+            private static final String REPAIR_EXECUTION_PROTOCOL = "【AI修复执行协议】\n"
+                    + "请严格按以下顺序处理：\n"
+                    + "1. 先阅读后文的 AI 诊断包，优先使用其中的代码证据、候选文件和推荐验证命令。\n"
+                    + "2. 若诊断包证据不足，先在当前仓库中搜索定位，不要只根据 Bug 标题猜测改动点。\n"
+                    + "3. 只做与当前 Bug 直接相关的最小必要改动，避免无关重构、格式化整文件或改动禅道业务数据。\n"
+                    + "4. 保留当前工作区已有未提交改动；不要执行 git reset、revert 或覆盖无关文件。\n"
+                    + "5. 修复后优先运行诊断包推荐的验证命令；如果无法运行，必须说明原因和替代验证方式。\n"
+                    + "6. 不要假称已经验证。未执行的命令要明确写“未执行”。\n\n"
+                    + "最终请按这个格式输出，便于回写禅道：\n"
+                    + "【AI修复报告】\n"
+                    + "- Bug：#编号 / 标题\n"
+                    + "- 根因：\n"
+                    + "- 改动文件：\n"
+                    + "- 关键改动：\n"
+                    + "- 验证命令与结果：\n"
+                    + "- 剩余风险：\n"
+                    + "- 禅道回写摘要：";
+
             private static String build(BugDetail bug) {
                 List<String> images = safePromptImages(bug).stream().limit(32).collect(Collectors.toList());
                 String imageText = images.isEmpty() ? "未提供" : indexedImages(images, "");
                 String description = textOrFallback(bug.description, bug.title);
                 String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
-                return "【Bug修复任务】\nBug编号：" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，Claude Code 可直接读取上述本地路径，不需要访问禅道链接。\n\n请在当前代码仓库中修复以上 Bug。完成后请说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+                String expectedText = textOrFallback(htmlText(bug.expectedResultHtml), bug.expectedResult);
+                String actualText = textOrFallback(bug.actualResult);
+                String attachmentText = formatAttachments(bug, "");
+                return "【Bug修复任务】\nBug编号：" + bug.id
+                        + "\n\n禅道缺陷单：\n" + formatBugMetadata(bug)
+                        + "\n\nBug描述：\n" + description
+                        + "\n\n复现步骤文本：\n" + reproduceText
+                        + "\n\n期望结果：\n" + expectedText
+                        + "\n\n实际结果：\n" + actualText
+                        + "\n\n复现步骤图片：\n" + imageText
+                        + "\n\n附件/视频线索：\n" + attachmentText
+                        + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，AI Agent 可直接读取上述本地路径，不需要访问禅道链接；视频文件不传给 AI，但文件名和链接会作为排查线索。"
+                        + "\n\n请在当前代码仓库中修复以上 Bug。\n\n"
+                        + REPAIR_EXECUTION_PROTOCOL;
             }
 
             private static String buildBatch(List<BugDetail> bugs) {
@@ -2318,9 +3721,24 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     String imageText = images.isEmpty() ? "  未提供" : indexedImages(images, "  ");
                     String description = textOrFallback(bug.description, bug.title);
                     String reproduceText = textOrFallback(htmlText(bug.reproduceStepsHtml), bug.reproduceSteps);
-                    sections.add("## " + (i + 1) + ". Bug #" + bug.id + "\n\nBug描述：\n" + description + "\n\n复现步骤文本：\n" + reproduceText + "\n\n复现步骤图片：\n" + imageText);
+                    String expectedText = textOrFallback(htmlText(bug.expectedResultHtml), bug.expectedResult);
+                    String actualText = textOrFallback(bug.actualResult);
+                    String attachmentText = formatAttachments(bug, "  ");
+                    sections.add("## " + (i + 1) + ". Bug #" + bug.id
+                            + "\n\n禅道缺陷单：\n" + indentLines(formatBugMetadata(bug), "  ")
+                            + "\n\nBug描述：\n" + description
+                            + "\n\n复现步骤文本：\n" + reproduceText
+                            + "\n\n期望结果：\n" + expectedText
+                            + "\n\n实际结果：\n" + actualText
+                            + "\n\n复现步骤图片：\n" + imageText
+                            + "\n\n附件/视频线索：\n" + attachmentText);
                 }
-                return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n" + String.join("\n\n---\n\n", sections) + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，Claude Code 可直接读取上述本地路径，不需要访问禅道链接。\n\n完成后请按 Bug 编号分别说明：\n1. 根因是什么\n2. 修改了哪些关键位置\n3. 如何验证修复";
+                return "【批量Bug修复任务】\n以下是当前列表中的未解决 Bug，请在当前代码仓库中依次分析并修复。\n\n"
+                        + String.join("\n\n---\n\n", sections)
+                        + "\n\n说明：图片已由 IDEA 使用当前禅道登录态下载为本地文件，AI Agent 可直接读取上述本地路径，不需要访问禅道链接；视频文件不传给 AI，但文件名和链接会作为排查线索。"
+                        + "\n\n请在当前代码仓库中按 Bug 编号依次修复。\n\n"
+                        + REPAIR_EXECUTION_PROTOCOL
+                        + "\n\n批量任务要求：每个 Bug 都要单独给出一份【AI修复报告】，不要把多个 Bug 的根因、验证和风险混在一起。";
             }
 
             private static List<String> safePromptImages(BugDetail bug) {
@@ -2333,6 +3751,35 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     lines.add(prefix + "- 图片" + (i + 1) + "：" + images.get(i));
                 }
                 return String.join("\n", lines);
+            }
+
+            private static String formatBugMetadata(BugDetail bug) {
+                return String.join("\n",
+                        "- 标题：" + textOrFallback(bug.title),
+                        "- 状态：" + textOrFallback(bug.status),
+                        "- 优先级：" + textOrFallback(bug.priority),
+                        "- 当前指派：" + textOrFallback(bug.assignedTo),
+                        "- 创建者：" + textOrFallback(bug.openedBy),
+                        "- 创建时间：" + textOrFallback(bug.createdAt));
+            }
+
+            private static String formatAttachments(BugDetail bug, String prefix) {
+                if (bug == null || bug.attachments == null || bug.attachments.isEmpty()) return prefix + "未提供";
+                List<String> lines = new ArrayList<>();
+                for (int i = 0; i < bug.attachments.size() && i < 16; i++) {
+                    Attachment attachment = bug.attachments.get(i);
+                    String kind = textOrFallback(attachment.kind, "file");
+                    String name = textOrFallback(attachment.name, "附件" + (i + 1));
+                    String url = attachment.url == null || attachment.url.isBlank() ? "" : "：" + attachment.url;
+                    lines.add(prefix + "- " + kind + " " + name + url);
+                }
+                return String.join("\n", lines);
+            }
+
+            private static String indentLines(String value, String prefix) {
+                return java.util.Arrays.stream((value == null ? "" : value).split("\\R", -1))
+                        .map(line -> prefix + line)
+                        .collect(Collectors.joining("\n"));
             }
 
             private static String textOrFallback(String... values) {
@@ -2493,7 +3940,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     pages.add(get("index.php", Map.of("m", "project", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse"), true));
                     pages.add(get("index.php", Map.of("m", "program", "f", "ajaxGetDropMenu", "objectID", productId, "module", "bug", "method", "browse"), true));
                 }
-                String html = String.join("\n", pages);
+                String html = decodeJsonHtml(String.join("\n", pages));
                 Map<String, Item> result = new LinkedHashMap<>();
                 for (String link : matches(html, "<a\\b[^>]*>[\\s\\S]*?</a>")) {
                     String href = attr(link, "href") + " " + attr(link, "data-url") + " " + attr(link, "data-href") + " " + attr(link, "onclick");
@@ -2531,50 +3978,102 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     case "member": assignedTo = assignee; break;
                     default: assignedTo = account;
                 }
+                BugListParseException parseFailure = null;
                 for (Map<String, String> param : bugParams(projectId, assignedTo)) {
-                    List<BugSummary> parsed = fetchBugListAllPages(param, assignedTo);
-                    if (!parsed.isEmpty()) return parsed;
+                    try {
+                        List<BugSummary> parsed = fetchBugListAllPages(param, assignedTo);
+                        if (!parsed.isEmpty()) return parsed;
+                    } catch (BugListParseException error) {
+                        parseFailure = error;
+                    }
+                }
+                if (parseFailure != null) {
+                    throw parseFailure;
                 }
                 return List.of();
             }
 
             private List<BugSummary> fetchBugListAllPages(Map<String, String> baseParams, String assignedTo) throws Exception {
                 Map<String, String> firstParams = new LinkedHashMap<>(baseParams);
-                firstParams.put("pageID", "1");
-                firstParams.put("recPerPage", String.valueOf(PAGE_SIZE));
-                String firstHtml = get("index.php", firstParams, false);
+                BugListPage firstPage = getBugListPage(firstParams, assignedTo, null);
+                String firstHtml = firstPage.html;
                 List<BugSummary> firstBugs = parseBugs(firstHtml, assignedTo);
                 BugListPager pager = parseBugListPager(firstHtml);
+                assertBugListParseHealthy(firstHtml, firstBugs, firstParams);
                 if (pager == null || pager.pageTotal <= 1) {
                     return firstBugs;
                 }
 
-                List<BugSummary> allBugs = new ArrayList<>(firstBugs);
+                boolean openOnlyBySearchFallback = isBySearchFallbackParams(baseParams)
+                        && !firstBugs.isEmpty()
+                        && firstBugs.stream().allMatch(ZenTaoClient::isOpenBug);
+                List<BugSummary> allBugs = openOnlyBySearchFallback
+                        ? firstBugs.stream().filter(ZenTaoClient::isOpenBug).collect(Collectors.toCollection(ArrayList::new))
+                        : new ArrayList<>(firstBugs);
                 for (int page = 2; page <= pager.pageTotal; page++) {
                     Map<String, String> pageParams = new LinkedHashMap<>(baseParams);
-                    pageParams.put("pageID", String.valueOf(page));
-                    pageParams.put("recPerPage", String.valueOf(pager.recPerPage));
                     pageParams.put("recTotal", String.valueOf(pager.recTotal));
-                    allBugs.addAll(parseBugs(get("index.php", pageParams, false), assignedTo));
+                    pageParams.put("recPerPage", String.valueOf(pager.recPerPage));
+                    pageParams.put("pageID", String.valueOf(page));
+                    try {
+                        List<BugSummary> pageBugs = parseBugs(getBugListPage(pageParams, assignedTo, firstPage.ajax).html, assignedTo);
+                        if (firstPage.ajax && hasSameBugIds(pageBugs, firstBugs)) {
+                            pageBugs = parseBugs(getBugListPage(pageParams, assignedTo, false).html, assignedTo);
+                            if (hasSameBugIds(pageBugs, firstBugs)) break;
+                        }
+                        List<BugSummary> bugsToAdd = openOnlyBySearchFallback
+                                ? pageBugs.stream().filter(ZenTaoClient::isOpenBug).collect(Collectors.toList())
+                                : pageBugs;
+                        if (bugsToAdd.isEmpty() && !allBugs.isEmpty()) break;
+                        allBugs.addAll(bugsToAdd);
+                        if (openOnlyBySearchFallback && pageBugs.stream().anyMatch(bug -> !isOpenBug(bug))) break;
+                    } catch (Exception error) {
+                        if (!allBugs.isEmpty()) break;
+                        throw error;
+                    }
                 }
                 Map<String, BugSummary> deduped = new LinkedHashMap<>();
                 for (BugSummary bug : allBugs) deduped.putIfAbsent(bug.id, bug);
                 return new ArrayList<>(deduped.values());
             }
 
+            private BugListPage getBugListPage(Map<String, String> params, String assignedTo, Boolean preferredAjax) throws Exception {
+                List<Boolean> modes = preferredAjax == null ? List.of(true, false) : List.of(preferredAjax, !preferredAjax);
+                BugListPage fallback = null;
+                BugListParseException parseFailure = null;
+                Set<Boolean> seen = new LinkedHashSet<>();
+                for (Boolean ajax : modes) {
+                    if (!seen.add(ajax)) continue;
+                    String html = get("index.php", params, ajax);
+                    List<BugSummary> bugs = parseBugs(html, assignedTo);
+                    try {
+                        assertBugListParseHealthy(html, bugs, params);
+                    } catch (BugListParseException error) {
+                        parseFailure = error;
+                        continue;
+                    }
+                    BugListPage page = new BugListPage(html, ajax);
+                    if (!bugs.isEmpty() || hasBugListPageEvidence(html)) return page;
+                    if (fallback == null) fallback = page;
+                }
+                if (parseFailure != null) throw parseFailure;
+                return fallback == null ? new BugListPage("", preferredAjax == null || preferredAjax) : fallback;
+            }
+
             private static BugListPager parseBugListPager(String html) {
-                Integer recTotal = readPagerNumber(html, "recTotal");
-                int recPerPage = readPagerNumber(html, "recPerPage") != null ? readPagerNumber(html, "recPerPage") : PAGE_SIZE;
-                int pageID = readPagerNumber(html, "pageID") != null ? readPagerNumber(html, "pageID") : 1;
-                Integer pageTotal = readPagerNumber(html, "pageTotal");
+                String source = decodeJsonHtml(html);
+                Integer recTotal = readPagerNumber(source, "recTotal");
+                int recPerPage = readPagerNumber(source, "recPerPage") != null ? readPagerNumber(source, "recPerPage") : PAGE_SIZE;
+                int pageID = readPagerNumber(source, "pageID") != null ? readPagerNumber(source, "pageID") : 1;
+                Integer pageTotal = readPagerNumber(source, "pageTotal");
 
                 Integer total = recTotal;
                 if (total == null) {
-                    Matcher summery = Pattern.compile("共\\s*(?:<[^>]+>\\s*)?(\\d+)\\s*(?:</[^>]+>\\s*)?项", Pattern.CASE_INSENSITIVE).matcher(html);
+                    Matcher summery = Pattern.compile("共\\s*(?:<[^>]+>\\s*)?(\\d+)\\s*(?:</[^>]+>\\s*)?项", Pattern.CASE_INSENSITIVE).matcher(source);
                     if (summery.find()) total = Integer.parseInt(summery.group(1));
                 }
                 if (total == null) {
-                    Matcher summery = Pattern.compile(",\\s*共\\s*(\\d+)\\s*项", Pattern.CASE_INSENSITIVE).matcher(html);
+                    Matcher summery = Pattern.compile(",\\s*共\\s*(\\d+)\\s*项", Pattern.CASE_INSENSITIVE).matcher(source);
                     if (summery.find()) total = Integer.parseInt(summery.group(1));
                 }
                 if (total == null || total <= 0) return null;
@@ -2586,16 +4085,30 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static Integer readPagerNumber(String html, String key) {
+                List<Integer> hiddenValues = new ArrayList<>();
                 Matcher hidden = Pattern.compile("<input\\b[^>]*\\b(?:id|name)=[\"']_?" + Pattern.quote(key) + "[\"'][^>]*\\bvalue=[\"'](\\d+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html);
-                if (hidden.find()) return Integer.parseInt(hidden.group(1));
+                while (hidden.find()) {
+                    int parsed = Integer.parseInt(hidden.group(1));
+                    if (parsed > 0) hiddenValues.add(parsed);
+                }
                 hidden = Pattern.compile("<input\\b[^>]*\\bvalue=[\"'](\\d+)[\"'][^>]*\\b(?:id|name)=[\"']_?" + Pattern.quote(key) + "[\"']", Pattern.CASE_INSENSITIVE).matcher(html);
-                if (hidden.find()) return Integer.parseInt(hidden.group(1));
+                while (hidden.find()) {
+                    int parsed = Integer.parseInt(hidden.group(1));
+                    if (parsed > 0) hiddenValues.add(parsed);
+                }
+                if (!hiddenValues.isEmpty()) {
+                    return "recTotal".equalsIgnoreCase(key) ? hiddenValues.stream().min(Integer::compareTo).orElse(null) : hiddenValues.get(0);
+                }
 
-                Matcher fromUrl = Pattern.compile("[?&]" + Pattern.quote(key) + "=?(\\d+)", Pattern.CASE_INSENSITIVE).matcher(html);
+                Matcher fromUrl = Pattern.compile("(?:[?&]|&amp;)" + Pattern.quote(key) + "=?(\\d+)", Pattern.CASE_INSENSITIVE).matcher(html);
                 Integer value = null;
                 while (fromUrl.find()) {
                     int parsed = Integer.parseInt(fromUrl.group(1));
-                    value = "recTotal".equalsIgnoreCase(key) ? (value == null ? parsed : Math.max(value, parsed)) : parsed;
+                    if ("recTotal".equalsIgnoreCase(key)) {
+                        if (parsed > 0) value = value == null ? parsed : Math.min(value, parsed);
+                    } else {
+                        value = parsed;
+                    }
                 }
                 if (value != null) return value;
 
@@ -2615,6 +4128,59 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     this.recPerPage = recPerPage;
                     this.pageID = pageID;
                     this.pageTotal = pageTotal;
+                }
+            }
+
+            private static final class BugListPage {
+                private final String html;
+                private final boolean ajax;
+
+                private BugListPage(String html, boolean ajax) {
+                    this.html = html;
+                    this.ajax = ajax;
+                }
+            }
+
+            private static final class BugListParseException extends RuntimeException {
+                private BugListParseException(String message) {
+                    super(message);
+                }
+            }
+
+            private static boolean hasBugListPageEvidence(String html) {
+                String source = decodeJsonHtml(html);
+                BugListPager pager = parseBugListPager(source);
+                int bugLinkCount = matches(source, "(?i)m=bug[^\"']*f=view|f=view[^\"']*m=bug|bug[-/]view|bug-view").size();
+                int bugIdPatternCount = matches(source, "(?i)(?:bugID|bug-id|data-bug-id|data-bug|id=[\"']bug)\\D{0,12}\\d+").size();
+                boolean hasNoDataText = htmlText(source).matches("(?is).*(暂无|没有|无数据|No data|No records).*");
+                return (pager != null && pager.recTotal > 0)
+                        || bugLinkCount > 0
+                        || (bugIdPatternCount > 0 && !hasNoDataText);
+            }
+
+            private static void assertBugListParseHealthy(String html, List<BugSummary> bugs, Map<String, String> params) {
+                if (!bugs.isEmpty()) return;
+                String source = decodeJsonHtml(html);
+                String text = htmlText(source);
+                BugListPager pager = parseBugListPager(source);
+                int rowCount = matches(source, "<tr\\b[\\s\\S]*?</tr>").size();
+                int cellCount = matches(source, "<td\\b[\\s\\S]*?</td>").size();
+                int bugLinkCount = matches(source, "(?i)m=bug[^\"']*f=view|f=view[^\"']*m=bug|bug[-/]view|bug-view").size();
+                int bugIdPatternCount = matches(source, "(?i)(?:bugID|bug-id|data-bug-id|data-bug|id=[\"']bug)\\D{0,12}\\d+").size();
+                boolean hasReturnedBugRows = hasBugListPageEvidence(source);
+                if (!hasReturnedBugRows) return;
+                String preview = text.replaceAll("\\s+", " ").trim();
+                if (preview.length() > 260) preview = preview.substring(0, 260);
+                throw new BugListParseException("禅道返回了 Bug 列表痕迹，但插件解析为 0。请反馈当前项目、筛选条件和页面摘要以便补充解析规则。请求参数：" + params + "；页面摘要：rows=" + rowCount + ", cells=" + cellCount + ", bugLinks=" + bugLinkCount + ", bugIdPatterns=" + bugIdPatternCount + ", recTotal=" + (pager == null ? "unknown" : pager.recTotal) + "；预览：" + preview);
+            }
+
+            private static final class LinkContext {
+                private final String text;
+                private final String context;
+
+                private LinkContext(String text, String context) {
+                    this.text = text;
+                    this.context = context;
                 }
             }
 
@@ -2651,7 +4217,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     try {
                         String html = get("index.php", param, false);
                         List<BugSummary> parsed = parseBugs(html, "");
-                        String text = htmlText(html);
+                        String text = htmlText(decodeJsonHtml(html));
                         builder.append("    {\"params\":\"").append(escapeJson(param.toString())).append("\",\"length\":").append(html.length()).append(",\"parsedBugCount\":").append(parsed.size()).append(",\"preview\":\"").append(escapeJson(text.substring(0, Math.min(300, text.length())))).append("\"}");
                     } catch (Exception error) {
                         builder.append("    {\"params\":\"").append(escapeJson(param.toString())).append("\",\"error\":\"").append(escapeJson(error.getMessage())).append("\"}");
@@ -2895,7 +4461,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private List<BugSummary> parseBugs(String html, String assignedTo) {
-                List<String> rows = matches(html, "<tr\\b[\\s\\S]*?</tr>");
+                String source = decodeJsonHtml(html);
+                List<String> rows = matches(source, "<tr\\b[\\s\\S]*?</tr>");
                 List<String> header = rows.stream().filter(row -> htmlText(row).matches(".*(Bug标题|标题|指派给|创建者|提交者).*")).findFirst().map(row -> matches(row, "<t[dh]\\b[\\s\\S]*?</t[dh]>").stream().map(ZenTaoClient::htmlText).collect(Collectors.toList())).orElse(List.of());
                 int titleIndex = indexOf(header, "Bug标题|标题");
                 int openedIndex = indexOf(header, "创建者|由谁创建|提交者");
@@ -2905,10 +4472,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 List<BugSummary> result = new ArrayList<>();
                 for (String row : rows) {
                     List<String> cells = matches(row, "<td\\b[\\s\\S]*?</td>").stream().map(ZenTaoClient::htmlText).collect(Collectors.toList());
-                    String id = cells.stream().filter(cell -> cell.matches("#?\\d+")).findFirst().orElse("").replace("#", "");
+                    String id = firstNonBlank(readBugIdFromRow(row), positiveBugId(cells.stream().filter(cell -> cell.matches("#?\\d+")).findFirst().orElse("").replace("#", "")));
                     if (id.isBlank()) continue;
-                    String bugLink = matches(row, "<a\\b[^>]*href=[\"'][^\"']*(?:m=bug[^\"']*f=view|bug[-/]view|bug-view)[^\"']*[\"'][^>]*>[\\s\\S]*?</a>").stream().findFirst().orElse("");
-                    String linkText = htmlText(bugLink);
+                    String linkText = matches(row, "<a\\b[^>]*href=[\"'][^\"']*(?:(?:m=bug[^\"']*f=view)|(?:f=view[^\"']*m=bug)|(?:bug[-/]view)|(?:bug-view))[^\"']*[\"'][^>]*>[\\s\\S]*?</a>")
+                            .stream()
+                            .map(ZenTaoClient::htmlText)
+                            .filter(text -> !text.isBlank() && !text.equals(id) && !text.matches("#?\\d+"))
+                            .findFirst()
+                            .orElse("");
                     String title = cell(cells, titleIndex);
                     if (title.isBlank() || title.matches("#?\\d+")) title = !linkText.isBlank() && !linkText.equals(id) && !linkText.matches("#?\\d+") ? linkText : cells.stream().filter(cell -> isLikelyBugTitleCell(cell, id)).findFirst().orElse("Bug #" + id);
                     boolean confirmed = isConfirmedText(cell(cells, confirmedIndex)) || cells.stream().anyMatch(ZenTaoClient::isConfirmedText);
@@ -2916,7 +4487,137 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 }
                 Map<String, BugSummary> deduped = new LinkedHashMap<>();
                 for (BugSummary bug : result) deduped.putIfAbsent(bug.id, bug);
-                return new ArrayList<>(deduped.values());
+                List<BugSummary> tableBugs = new ArrayList<>(deduped.values());
+                if (!tableBugs.isEmpty()) return tableBugs;
+                List<BugSummary> linkBugs = parseBugLinks(source, assignedTo);
+                return linkBugs.isEmpty() ? parseBugDataIdContexts(source, assignedTo) : linkBugs;
+            }
+
+            private List<BugSummary> parseBugLinks(String html, String assignedTo) {
+                String source = decodeJsonHtml(html);
+                Map<String, List<LinkContext>> grouped = new LinkedHashMap<>();
+                for (String link : matches(source, "<a\\b[^>]*href=[\"'][^\"']*(?:(?:m=bug[^\"']*f=view)|(?:f=view[^\"']*m=bug)|(?:bug[-/]view)|(?:bug-view))[^\"']*[\"'][^>]*>[\\s\\S]*?</a>")) {
+                    String href = attr(link, "href");
+                    String id = firstNonBlank(readBugIdFromHref(href), positiveBugId(htmlText(link).replaceFirst("^#?(\\d+)$", "$1")));
+                    if (id == null || id.isBlank()) continue;
+                    int index = source.indexOf(link);
+                    String context = index >= 0
+                            ? source.substring(Math.max(0, index - 1600), Math.min(source.length(), index + 2600))
+                            : link;
+                    grouped.computeIfAbsent(id, ignored -> new ArrayList<>()).add(new LinkContext(htmlText(link), context));
+                }
+
+                List<BugSummary> result = new ArrayList<>();
+                for (Map.Entry<String, List<LinkContext>> entry : grouped.entrySet()) {
+                    String id = entry.getKey();
+                    String contextText = entry.getValue().stream().map(item -> htmlText(item.context)).collect(Collectors.joining(" "));
+                    String title = entry.getValue().stream()
+                            .map(item -> item.text == null ? "" : item.text.trim())
+                            .filter(text -> !text.isBlank() && !text.equals(id) && !text.equals("#" + id) && !text.matches("#?\\d+"))
+                            .findFirst()
+                            .orElse("Bug #" + id);
+                    result.add(new BugSummary(
+                            id,
+                            title,
+                            parsePriority(contextText),
+                            parseStatus(contextText),
+                            firstMatch(contextText, "\\d{4}-\\d{2}-\\d{2}|\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}"),
+                            firstNonBlank(readAssigneeFromContext(contextText), assignedTo),
+                            "",
+                            looksLikeVideo(contextText),
+                            isConfirmedText(contextText)
+                    ));
+                }
+                return result;
+            }
+
+            private List<BugSummary> parseBugDataIdContexts(String html, String assignedTo) {
+                String source = decodeJsonHtml(html);
+                Map<String, BugSummary> result = new LinkedHashMap<>();
+                Matcher matcher = Pattern.compile("\\bdata-(?:bug-id|bug|id)=[\"']([1-9]\\d*)[\"']", Pattern.CASE_INSENSITIVE).matcher(source);
+                while (matcher.find()) {
+                    String id = positiveBugId(matcher.group(1));
+                    if (id.isBlank() || result.containsKey(id)) continue;
+                    String contextHtml = source.substring(Math.max(0, matcher.start() - 1800), Math.min(source.length(), matcher.start() + 3200));
+                    String contextText = htmlText(contextHtml);
+                    if (!looksLikeBugListContext(id, contextHtml, contextText)) continue;
+                    result.put(id, new BugSummary(
+                            id,
+                            extractBugTitleFromContext(id, contextText),
+                            parsePriority(contextText),
+                            parseStatus(contextText),
+                            firstMatch(contextText, "\\d{4}-\\d{2}-\\d{2}|\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}"),
+                            firstNonBlank(readAssigneeFromContext(contextText), assignedTo),
+                            "",
+                            looksLikeVideo(contextText),
+                            isConfirmedText(contextText)
+                    ));
+                }
+                return new ArrayList<>(result.values());
+            }
+
+            private static boolean looksLikeBugListContext(String id, String html, String text) {
+                if (text == null || !text.contains(id)) return false;
+                boolean hasBugMarker = html.matches("(?is).*(bugIDList|bugID|Bug|bug[-/]view|bug-view|m=bug).*") || text.contains("Bug");
+                boolean hasStatus = text.matches("(?is).*(激活|已解决|关闭|active|resolved|closed|婵€娲粅宸茶В鍐硘鍏抽棴).*");
+                boolean hasPriority = text.matches("(?is).*(一般|严重|致命|建议|高|中|低|high|medium|low|涓€鑸瑋涓ラ噸|鑷村懡|寤鸿|楂榺涓瓅浣?).*");
+                boolean hasDate = text.matches("(?is).*?(\\d{4}-\\d{2}-\\d{2}|\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}).*");
+                return hasBugMarker && hasStatus && hasPriority && hasDate;
+            }
+
+            private static String extractBugTitleFromContext(String id, String text) {
+                String normalized = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+                int idIndex = normalized.indexOf(id);
+                String afterId = idIndex >= 0 ? normalized.substring(idIndex + id.length()).trim() : normalized;
+                Matcher matcher = Pattern.compile("^(.{4,160}?)(?:\\s+(?:一般|严重|致命|建议|高|中|低|high|medium|low|激活|已解决|关闭|未确认|已确认|\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}|涓€鑸?|涓ラ噸|鑷村懡|寤鸿|婵€娲?|宸茶В鍐?|鍏抽棴))", Pattern.CASE_INSENSITIVE).matcher(afterId);
+                if (matcher.find()) {
+                    String title = matcher.group(1).trim();
+                    if (!title.isBlank()) return title;
+                }
+                String fallback = afterId.length() > 120 ? afterId.substring(0, 120).trim() : afterId.trim();
+                return fallback.isBlank() ? "Bug #" + id : fallback;
+            }
+
+            private static String readBugIdFromHref(String href) {
+                String source = href == null ? "" : href.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'");
+                return positiveBugId(firstNonBlank(
+                        readQueryParam(source, "bugID"),
+                        readQueryParam(source, "id"),
+                        firstMatch(source, "bug[-/]view[-/](\\d+)"),
+                        firstMatch(source, "bug-view-(\\d+)"),
+                        firstMatch(source, "[?&]bug=(\\d+)"),
+                        firstMatch(source, "(?:^|[/?&=-])bugID[=/](\\d+)"),
+                        firstMatch(source, "(?:^|[/?&=-])id[=/](\\d+)")
+                ));
+            }
+
+            private static String readBugIdFromRow(String row) {
+                for (String link : matches(row, "<a\\b[^>]*href=[\"'][^\"']*(?:(?:m=bug[^\"']*f=view)|(?:f=view[^\"']*m=bug)|(?:bug[-/]view)|(?:bug-view))[^\"']*[\"'][^>]*>[\\s\\S]*?</a>")) {
+                    String id = readBugIdFromHref(attr(link, "href"));
+                    if (!id.isBlank()) return id;
+                }
+                for (String attrName : List.of("data-bug-id", "data-bug")) {
+                    String value = positiveBugId(firstMatch(attr(row, attrName), "\\d+"));
+                    if (value != null && !value.isBlank()) return value;
+                }
+                for (String input : matches(row, "<input\\b[^>]*>")) {
+                    String inputMarker = attr(input, "name") + " " + attr(input, "id") + " " + attr(input, "class");
+                    if (!inputMarker.matches("(?is).*bug.*")) continue;
+                    String value = positiveBugId(firstMatch(attr(input, "value"), "\\d+"));
+                    if (value != null && !value.isBlank()) return value;
+                }
+                String inlineBugId = firstMatch(row, "\\bbugID\\s*[:=]\\s*[\"']?(\\d+)");
+                return positiveBugId(inlineBugId);
+            }
+
+            private static String positiveBugId(String value) {
+                if (value == null) return "";
+                String text = value.trim().replaceFirst("^#", "");
+                return text.matches("[1-9]\\d*") ? text : "";
+            }
+
+            private static String readAssigneeFromContext(String value) {
+                return firstMatch(value, "指派给\\s*[:：]?\\s*([^\\s,，;；|]+)");
             }
 
             private List<Map<String, String>> bugParams(String projectId, String assignedTo) {
@@ -2926,32 +4627,134 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (projectId != null && !projectId.isBlank()) base.put("productID", projectId);
                 if (!assignedTo.isBlank()) base.put("assignedTo", assignedTo);
                 List<Map<String, String>> result = new ArrayList<>();
-                result.add(base);
-                if (projectId != null && !projectId.isBlank()) {
+                List<Map<String, String>> bases = bugScopeParamVariants(base);
+                for (Map<String, String> scopedBase : bases) {
+                    Map<String, String> visible = new LinkedHashMap<>(scopedBase);
+                    visible.put("branch", "all");
+                    visible.put("browseType", "unclosed");
+                    visible.put("param", "0");
+                    visible.put("orderBy", "");
+                    result.add(visible);
+                    String scopedId = firstNonBlank(
+                            scopedBase.get("productID"),
+                            scopedBase.get("productid"),
+                            scopedBase.get("projectID"),
+                            scopedBase.get("executionID")
+                    );
+                    if (scopedId != null && !scopedId.isBlank()) {
+                        Map<String, String> lowerVisible = new LinkedHashMap<>(scopedBase);
+                        lowerVisible.remove("productID");
+                        lowerVisible.put("productid", scopedId);
+                        lowerVisible.put("branch", "all");
+                        lowerVisible.put("browseType", "unclosed");
+                        lowerVisible.put("param", "0");
+                        lowerVisible.put("orderBy", "");
+                        result.add(lowerVisible);
+                    }
+                    Map<String, String> exactBySearch = new LinkedHashMap<>(scopedBase);
+                    exactBySearch.put("branch", "all");
+                    exactBySearch.put("browseType", "bySearch");
+                    exactBySearch.put("param", "0");
+                    exactBySearch.put("orderBy", "");
+                    result.add(exactBySearch);
+                    if (scopedId != null && !scopedId.isBlank()) {
+                        Map<String, String> lowerBySearch = new LinkedHashMap<>(scopedBase);
+                        lowerBySearch.remove("productID");
+                        lowerBySearch.put("productid", scopedId);
+                        lowerBySearch.put("branch", "all");
+                        lowerBySearch.put("browseType", "bySearch");
+                        lowerBySearch.put("param", "0");
+                        lowerBySearch.put("orderBy", "");
+                        result.add(lowerBySearch);
+                    }
+                }
+                result.addAll(bases);
+                for (Map<String, String> scopedBase : bases) {
+                    String scopedId = firstNonBlank(
+                            scopedBase.get("productID"),
+                            scopedBase.get("productid"),
+                            scopedBase.get("projectID"),
+                            scopedBase.get("executionID")
+                    );
+                    if (scopedId == null) scopedId = "";
                     Map<String, String> browser = new LinkedHashMap<>(base);
                     browser.remove("productID");
-                    browser.put("productid", projectId);
-                    browser.put("branch", "all");
-                    browser.put("browseType", "unresolved");
-                    result.add(browser);
-                    Map<String, String> unresolvedUpper = new LinkedHashMap<>(base);
+                    if (!scopedId.isBlank()) {
+                        browser = new LinkedHashMap<>(scopedBase);
+                        browser.remove("productID");
+                        browser.put("productid", scopedId);
+                        browser.put("branch", "all");
+                        browser.put("browseType", "unresolved");
+                        result.add(browser);
+                    }
+                    Map<String, String> unresolvedUpper = new LinkedHashMap<>(scopedBase);
                     unresolvedUpper.put("branch", "all");
                     unresolvedUpper.put("browseType", "unresolved");
                     result.add(unresolvedUpper);
+                    Map<String, String> bySearchUpper = new LinkedHashMap<>(scopedBase);
+                    bySearchUpper.put("branch", "all");
+                    bySearchUpper.put("browseType", "bySearch");
+                    bySearchUpper.put("param", "0");
+                    bySearchUpper.put("orderBy", "");
+                    result.add(bySearchUpper);
                     Map<String, String> bySearchLower = new LinkedHashMap<>(browser);
                     bySearchLower.put("browseType", "bySearch");
+                    bySearchLower.put("param", "0");
+                    bySearchLower.put("orderBy", "");
                     result.add(bySearchLower);
+                    for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
+                        Map<String, String> next = new LinkedHashMap<>(scopedBase);
+                        next.put("browseType", type);
+                        result.add(next);
+                    }
+                    Map<String, String> ordered = new LinkedHashMap<>(scopedBase);
+                    ordered.put("browseType", "all");
+                    ordered.put("param", "0");
+                    ordered.put("orderBy", "id_desc");
+                    result.add(ordered);
                 }
-                for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
-                    Map<String, String> next = new LinkedHashMap<>(base);
-                    next.put("browseType", type);
-                    result.add(next);
-                }
-                Map<String, String> ordered = new LinkedHashMap<>(base);
-                ordered.put("browseType", "all");
-                ordered.put("param", "0");
-                ordered.put("orderBy", "id_desc");
-                result.add(ordered);
+                return dedupeParams(result);
+            }
+
+            private static List<Map<String, String>> bugScopeParamVariants(Map<String, String> baseParams) {
+                String scopeId = firstNonBlank(
+                        baseParams.get("productID"),
+                        baseParams.get("productid"),
+                        baseParams.get("projectID"),
+                        baseParams.get("executionID")
+                );
+                if (scopeId == null || scopeId.isBlank()) return List.of(baseParams);
+
+                Map<String, String> base = new LinkedHashMap<>(baseParams);
+                base.remove("productID");
+                base.remove("productid");
+                base.remove("projectID");
+                base.remove("executionID");
+
+                List<Map<String, String>> result = new ArrayList<>();
+                result.add(new LinkedHashMap<>(baseParams));
+                Map<String, String> productUpper = new LinkedHashMap<>(base);
+                productUpper.put("productID", scopeId);
+                result.add(productUpper);
+                Map<String, String> productLower = new LinkedHashMap<>(base);
+                productLower.put("productid", scopeId);
+                result.add(productLower);
+                Map<String, String> project = new LinkedHashMap<>(base);
+                project.put("projectID", scopeId);
+                result.add(project);
+                Map<String, String> execution = new LinkedHashMap<>(base);
+                execution.put("executionID", scopeId);
+                result.add(execution);
+                Map<String, String> projectBug = new LinkedHashMap<>(base);
+                projectBug.put("m", "project");
+                projectBug.put("f", "bug");
+                projectBug.put("projectID", scopeId);
+                result.add(projectBug);
+                Map<String, String> executionBug = new LinkedHashMap<>(base);
+                executionBug.put("m", "execution");
+                executionBug.put("f", "bug");
+                executionBug.put("executionID", scopeId);
+                result.add(executionBug);
                 return dedupeParams(result);
             }
 
@@ -3001,13 +4804,58 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 if (projectId != null && !projectId.isBlank()) base.put("productID", projectId);
                 if (assignedTo != null && !assignedTo.isBlank()) base.put("assignedTo", assignedTo);
                 List<Map<String, String>> result = new ArrayList<>();
-                result.add(base);
-                for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
-                    Map<String, String> next = new LinkedHashMap<>(base);
-                    next.put("browseType", type);
-                    result.add(next);
+                List<Map<String, String>> bases = bugScopeParamVariants(base);
+                for (Map<String, String> scopedBase : bases) {
+                    Map<String, String> visible = new LinkedHashMap<>(scopedBase);
+                    visible.put("branch", "all");
+                    visible.put("browseType", "unclosed");
+                    visible.put("param", "0");
+                    visible.put("orderBy", "");
+                    result.add(visible);
+                    String scopedId = firstNonBlank(
+                            scopedBase.get("productID"),
+                            scopedBase.get("productid"),
+                            scopedBase.get("projectID"),
+                            scopedBase.get("executionID")
+                    );
+                    if (scopedId != null && !scopedId.isBlank()) {
+                        Map<String, String> lowerVisible = new LinkedHashMap<>(scopedBase);
+                        lowerVisible.remove("productID");
+                        lowerVisible.put("productid", scopedId);
+                        lowerVisible.put("branch", "all");
+                        lowerVisible.put("browseType", "unclosed");
+                        lowerVisible.put("param", "0");
+                        lowerVisible.put("orderBy", "");
+                        result.add(lowerVisible);
+                    }
                 }
-                return result;
+                result.addAll(bases);
+                for (Map<String, String> scopedBase : bases) {
+                    for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
+                        Map<String, String> next = new LinkedHashMap<>(scopedBase);
+                        next.put("browseType", type);
+                        result.add(next);
+                    }
+                }
+                return dedupeParams(result);
+            }
+
+            private static boolean isBySearchFallbackParams(Map<String, String> params) {
+                return "bug".equals(params.get("m"))
+                        && "browse".equals(params.get("f"))
+                        && "bysearch".equalsIgnoreCase(params.getOrDefault("browseType", ""));
+            }
+
+            private static boolean isOpenBug(BugSummary bug) {
+                return !"resolved".equals(bug.status) && !"closed".equals(bug.status);
+            }
+
+            private static boolean hasSameBugIds(List<BugSummary> left, List<BugSummary> right) {
+                if (left.isEmpty() || left.size() != right.size()) return false;
+                for (int i = 0; i < left.size(); i++) {
+                    if (!left.get(i).id.equals(right.get(i).id)) return false;
+                }
+                return true;
             }
 
             private static List<MemberSource> dedupeMemberSources(List<MemberSource> values) {
@@ -3021,9 +4869,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static List<Item> parseMemberOptionsFromSelects(String html) {
+                String source = decodeJsonHtml(html);
                 String names = "assignedTo|assignedTo\\[\\]|openedBy|resolvedBy|closedBy|confirmedBy|lastEditedBy";
                 List<Item> result = new ArrayList<>();
-                for (String select : matches(html, "<select\\b[^>]*\\bname=[\"'](?:" + names + ")[\"'][^>]*>[\\s\\S]*?</select>")) {
+                for (String select : matches(source, "<select\\b[^>]*\\bname=[\"'](?:" + names + ")[\"'][^>]*>[\\s\\S]*?</select>")) {
                     for (String option : matches(select, "<option\\b[^>]*>[\\s\\S]*?</option>")) {
                         String account = attr(option, "value").trim();
                         String name = htmlText(option).trim();
@@ -3036,8 +4885,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static List<Item> parseMembersFromTeamTable(String html) {
+                String source = decodeJsonHtml(html);
                 Map<String, Item> result = new LinkedHashMap<>();
-                for (String row : matches(html, "<tr\\b[\\s\\S]*?</tr>")) {
+                for (String row : matches(source, "<tr\\b[\\s\\S]*?</tr>")) {
                     String text = htmlText(row);
                     if (!text.matches("(?is).*(账号|用户名|真实姓名|成员|realname|account).*") && matches(row, "<td\\b[\\s\\S]*?</td>").isEmpty()) continue;
                     for (String link : matches(row, "<a\\b[^>]*>[\\s\\S]*?</a>")) {
@@ -3076,8 +4926,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static List<String> extractProductIds(String html) {
+                String source = decodeJsonHtml(html);
                 Set<String> result = new LinkedHashSet<>();
-                Matcher matcher = Pattern.compile("(?:productID|productid)[=/](\\d+)|(?:bug|product)[-/]browse[-/](\\d+)|data-(?:id|key|value)=[\"'](\\d+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html == null ? "" : html);
+                Matcher matcher = Pattern.compile("(?:productID|productid)[=/](\\d+)|(?:bug|product)[-/]browse[-/](\\d+)|data-(?:id|key|value)=[\"'](\\d+)[\"']", Pattern.CASE_INSENSITIVE).matcher(source == null ? "" : source);
                 while (matcher.find()) {
                     for (int i = 1; i <= matcher.groupCount(); i++) {
                         if (matcher.group(i) != null) result.add(matcher.group(i));
@@ -3363,6 +5214,17 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             private static String first(String value, String regex) {
                 Matcher matcher = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(value == null ? "" : value);
                 return matcher.find() ? matcher.group() : "";
+            }
+
+            private static String firstMatch(String value, String regex) {
+                Matcher matcher = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(value == null ? "" : value);
+                if (!matcher.find()) return "";
+                return matcher.groupCount() >= 1 ? matcher.group(1) : matcher.group();
+            }
+
+            private static String readQueryParam(String value, String name) {
+                Matcher matcher = Pattern.compile("[?&]" + Pattern.quote(name) + "=([^&#]+)", Pattern.CASE_INSENSITIVE).matcher(value == null ? "" : value);
+                return matcher.find() ? urlDecode(matcher.group(1)) : "";
             }
 
             private static String firstText(String value, String regex) {
@@ -3703,9 +5565,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static String parsePriority(String value) {
-                if (value.matches("(?is).*(严重|高|high|p1).*")) return "high";
-                if (value.matches("(?is).*(一般|中|medium|p2).*")) return "medium";
-                if (value.matches("(?is).*(低|low|p3).*")) return "low";
+                if (value.matches("(?is).*(严重|致命|高|high|p1).*")) return "high";
+                if (value.matches("(?is).*(一般|普通|中|medium|p2).*")) return "medium";
+                if (value.matches("(?is).*(建议|低|low|p3).*")) return "low";
                 return "unknown";
             }
 

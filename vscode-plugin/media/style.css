@@ -139,10 +139,18 @@ button:disabled {
   padding: 4px 10px;
 }
 
-#aiEngine {
+#aiEngine,
+#repairMode {
   border-radius: 999px;
-  max-width: 120px;
   padding: 4px 8px;
+}
+
+#aiEngine {
+  max-width: 120px;
+}
+
+#repairMode {
+  max-width: 84px;
 }
 
 .ai-fix-button::before {
