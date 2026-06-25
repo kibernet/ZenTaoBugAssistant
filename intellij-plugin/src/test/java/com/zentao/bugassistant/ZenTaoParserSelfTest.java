@@ -185,6 +185,33 @@ public final class ZenTaoParserSelfTest {
         assertEquals("蔡宏亮", zentao18Bugs.get(0).get("assignedTo"), "zentao 18 bug assignee");
         assertEquals("false", zentao18Bugs.get(0).get("confirmed"), "zentao 18 bug confirmed");
 
+        String activeRowWithCloseActionHtml = jsonHtml(
+                "<table><tbody><tr>" +
+                "<td><a href=\"/index.php?m=bug&amp;f=view&amp;bugID=184055\">184055</a></td>" +
+                "<td>active</td><td>closed</td><td>测试状态解析</td>" +
+                "</tr></tbody></table>");
+        List<Map<String, String>> activeRowWithCloseActionBugs = ZenTaoBugAssistantToolWindowFactory.parseBugListForTest(activeRowWithCloseActionHtml);
+        assertEquals(1, activeRowWithCloseActionBugs.size(), "active row with close action bug count");
+        assertEquals("active", activeRowWithCloseActionBugs.get(0).get("status"), "active status should match VS Code before close action text");
+
+        Map<String, Integer> zentao18Pager = ZenTaoBugAssistantToolWindowFactory.parseBugPagerForTest(zentao18TableHtml);
+        assertEquals(22, zentao18Pager.get("recTotal"), "zentao 18 pager recTotal");
+        assertEquals(20, zentao18Pager.get("recPerPage"), "zentao 18 pager recPerPage");
+        assertEquals(1, zentao18Pager.get("pageID"), "zentao 18 pager pageID");
+        assertEquals(2, zentao18Pager.get("pageTotal"), "zentao 18 pager pageTotal");
+
+        List<Map<String, String>> bugParams = ZenTaoBugAssistantToolWindowFactory.bugParamsForTest("34");
+        if (bugParams.isEmpty()) {
+            throw new AssertionError("bug params should not be empty");
+        }
+        assertEquals("34", bugParams.get(0).get("productID"), "first bug param should match VS Code productID scope");
+        assertEquals("unclosed", bugParams.get(0).get("browseType"), "first bug param browseType");
+        boolean hasLowerUnresolved = bugParams.stream().anyMatch(params ->
+                "34".equals(params.get("productid")) && "unresolved".equals(params.get("browseType")));
+        if (!hasLowerUnresolved) {
+            throw new AssertionError("bug params should include VS Code lowercase productid unresolved candidate");
+        }
+
         String prompt = ZenTaoBugAssistantToolWindowFactory.buildPromptForTest();
         assertContains(prompt, "禅道缺陷单", "prompt metadata section");
         assertContains(prompt, "当前指派：王强强", "prompt assignee");

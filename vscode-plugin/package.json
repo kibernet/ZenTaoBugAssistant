@@ -2,7 +2,7 @@
   "name": "zentao-bug-assistant-vscode",
   "displayName": "ZenTao Bug Assistant",
   "description": "AI-powered ZenTao bug repair context workflow for Cursor, Claude, and CLI agents.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "publisher": "kibernet",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -118,7 +118,7 @@
       "properties": {
         "zentaoBugAssistant.serverUrl": {
           "type": "string",
-          "default": "http://your-zentao-server/",
+          "default": "http://zentao.yuwan-game.com:8088/",
           "description": "禅道服务器地址。安装后请改成你的团队禅道地址。"
         },
         "zentaoBugAssistant.aiEngine": {

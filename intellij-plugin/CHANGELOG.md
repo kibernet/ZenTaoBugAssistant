@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1
+## 1.1.0
 
 - Added Chat / CLI repair mode selection.
 - Added configurable CLI command templates in Settings.

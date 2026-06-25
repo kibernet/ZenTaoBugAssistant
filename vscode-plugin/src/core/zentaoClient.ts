@@ -16,9 +16,10 @@ import * as path from "path";
 
 const defaultTimeoutMs = 10_000;
 const defaultBugRecPerPage = 20;
-export const DEFAULT_ZENTAO_SERVER_URL = "http://your-zentao-server/";
+export const DEFAULT_ZENTAO_SERVER_URL = "http://zentao.yuwan-game.com:8088/";
 const PLACEHOLDER_SERVER_URLS = new Set([
   "",
+  DEFAULT_ZENTAO_SERVER_URL,
   "http://your-zentao-server/",
   "http://your-zentao-server"
 ]);
@@ -765,7 +766,7 @@ export class ZenTaoClient {
         ...fetchInit,
         signal: controller.signal,
         headers: {
-          "User-Agent": "ZenTaoBugAssistant/1.0.1",
+          "User-Agent": "ZenTaoBugAssistant/1.1.0",
           Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
           ...(init.ajax === false ? {} : { "X-Requested-With": "XMLHttpRequest" }),
           ...this.authHeaders(),

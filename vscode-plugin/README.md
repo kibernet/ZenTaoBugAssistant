@@ -37,7 +37,7 @@
 
 | 设置项 | 说明 | 默认值 |
 |---|---|---|
-| `zentaoBugAssistant.serverUrl` | 禅道服务器地址 | `http://your-zentao-server/` |
+| `zentaoBugAssistant.serverUrl` | 禅道服务器地址 | `http://zentao.yuwan-game.com:8088/` |
 | `zentaoBugAssistant.aiEngine` | AI 引擎（`claudeCode` / `cursor`） | `claudeCode` |
 | `zentaoBugAssistant.repairMode` | 修复方式（`chat` / `cli`） | `chat` |
 | `zentaoBugAssistant.cliCommandTemplate` | CLI 命令模板，支持 `{promptFile}`、`{promptFileRaw}`、`{bugIds}`、`{engine}` | 空，使用默认模板 |

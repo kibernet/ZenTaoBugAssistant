@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.zentao.bugassistant"
-version = "1.0.1"
+version = "1.1.0"
 
 repositories {
     maven { url = uri("https://maven.aliyun.com/repository/public") }

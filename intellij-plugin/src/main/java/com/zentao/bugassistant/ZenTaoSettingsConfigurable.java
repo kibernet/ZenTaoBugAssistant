@@ -17,7 +17,8 @@ import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.Nullable;
 
 public final class ZenTaoSettingsConfigurable implements Configurable {
-    private static final String DEFAULT_SERVER = "http://your-zentao-server/";
+    private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
+    private static final String LEGACY_PLACEHOLDER_SERVER = "http://your-zentao-server";
     private static final String REPAIR_MODE_CHAT = "chat";
     private static final String REPAIR_MODE_CLI = "cli";
 
@@ -119,6 +120,14 @@ public final class ZenTaoSettingsConfigurable implements Configurable {
             return DEFAULT_SERVER;
         }
         String trimmed = value.trim();
+        if (isPlaceholderServerUrl(trimmed)) {
+            return DEFAULT_SERVER;
+        }
         return trimmed.endsWith("/") ? trimmed : trimmed + "/";
+    }
+
+    private static boolean isPlaceholderServerUrl(String value) {
+        return LEGACY_PLACEHOLDER_SERVER.equalsIgnoreCase(value)
+                || (LEGACY_PLACEHOLDER_SERVER + "/").equalsIgnoreCase(value);
     }
 }

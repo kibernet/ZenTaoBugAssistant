@@ -137,6 +137,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         return result;
     }
 
+    static List<Map<String, String>> bugParamsForTest(String projectId) {
+        return new ZenTaoBugAssistantPanel.ZenTaoClient().bugParams(projectId, "");
+    }
+
     static String buildPromptForTest() {
         ZenTaoBugAssistantPanel.BugDetail detail = new ZenTaoBugAssistantPanel.BugDetail(
                 "183099",
@@ -163,7 +167,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
     }
 
     private static final class ZenTaoBugAssistantPanel {
-        private static final String DEFAULT_SERVER = "http://your-zentao-server/";
+        private static final String DEFAULT_SERVER = "http://zentao.yuwan-game.com:8088/";
+        private static final String LEGACY_PLACEHOLDER_SERVER = "http://your-zentao-server";
+        private static final String MEMBER_SEARCH_PLACEHOLDER = "搜索成员姓名或账号，留空显示全部成员";
         private static final String REPAIR_MODE_CHAT = "chat";
         private static final String REPAIR_MODE_CLI = "cli";
         private static final String PASSWORD_MASK = "********";
@@ -525,7 +531,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return DEFAULT_SERVER;
             }
             String trimmed = value.trim();
+            if (isPlaceholderServerUrl(trimmed)) {
+                return DEFAULT_SERVER;
+            }
             return trimmed.endsWith("/") ? trimmed : trimmed + "/";
+        }
+
+        private static boolean isPlaceholderServerUrl(String value) {
+            return LEGACY_PLACEHOLDER_SERVER.equalsIgnoreCase(value)
+                    || (LEGACY_PLACEHOLDER_SERVER + "/").equalsIgnoreCase(value);
         }
 
         private void addFilter(JPanel filters, String key, String text) {
@@ -665,7 +679,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void setupMemberSearchBox() {
             JTextComponent editor = memberSearchEditor();
-            editor.setToolTipText("搜索成员姓名或账号，留空显示全部成员");
+            editor.setToolTipText(null);
+            editor.putClientProperty("JTextField.placeholderText", MEMBER_SEARCH_PLACEHOLDER);
+            if (editor instanceof JBTextField) {
+                ((JBTextField)editor).getEmptyText().setText(MEMBER_SEARCH_PLACEHOLDER);
+            }
             DocumentListener searchListener = new DocumentListener() {
                 private void refresh() {
                     if (hydratingMembers || programmaticMemberUpdate) return;
@@ -938,6 +956,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             savePreferences();
             String password = resolvedPasswordForLogin();
             if (accountField.getText().trim().isBlank() || password.isBlank()) {
+                clearPasswordMaskIfNoSavedPassword();
                 setStatus("请输入禅道账号和密码。");
                 return;
             }
@@ -1045,8 +1064,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             if (!client.loggedIn()) return;
             runAsync("正在获取 Bug 列表...", () -> {
                 client.clearPromptImages();
-                List<BugSummary> result = client.listBugs(selectedProjectId(), "all", "", accountField.getText());
-                return client.enrichVideoFlags(result);
+                return client.listBugs(selectedProjectId(), "all", "", accountField.getText());
             }, result -> {
                 bugs.clear();
                 bugs.addAll(result);
@@ -2469,10 +2487,11 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     "$__ztInstruction = \"Read this exact UTF-8 Markdown file and execute the ZenTao bug-fix task described in it. File: $__ztPromptFile. If this exact file cannot be read, print CANNOT_READ and stop; do not use any other repair-session file.\"",
                     "function Invoke-ZenTaoClaudeAgent {",
                     "  param([string]$Instruction)",
-                    "  $state = @{ printed = $false; openLine = $false; busyLine = $false; busyFlag = ''; busyProcess = $null; lastText = ''; streamedText = ''; toolTotal = 0; toolSeen = @{}; toolParts = @{}; thinkingChars = 0; lastThinkingLog = 0 }",
+                    "  $state = @{ printed = $false; openLine = $false; busyLine = $false; busyFlag = ''; busyStatus = ''; busyProcess = $null; lastText = ''; streamedText = ''; toolTotal = 0; toolSeen = @{}; toolParts = @{}; thinkingChars = 0; thinkingTokens = 0 }",
                     "  function Clear-BusyLine {",
                     "    if (-not $state.busyLine) { return }",
                     "    if ($state.busyFlag) { Remove-Item -LiteralPath $state.busyFlag -Force -ErrorAction SilentlyContinue }",
+                    "    if ($state.busyStatus) { Remove-Item -LiteralPath $state.busyStatus -Force -ErrorAction SilentlyContinue }",
                     "    if ($state.busyProcess) {",
                     "      try {",
                     "        [void]$state.busyProcess.WaitForExit(1000)",
@@ -2481,25 +2500,33 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     "      $state.busyProcess = $null",
                     "    }",
                     "    $state.busyFlag = ''",
+                    "    $state.busyStatus = ''",
                     "    $width = 120",
                     "    try { $width = [Math]::Max(80, [Console]::BufferWidth - 1) } catch {}",
                     "    [Console]::Write([char]13 + (' ' * $width) + [char]13)",
                     "    $state.busyLine = $false",
                     "  }",
                     "  function Show-BusyLine {",
-                    "    param([string]$Text = 'AI working')",
+                    "    param([string]$Text = 'working')",
                     "    if ($state.openLine -or $state.busyLine) { return }",
                     "    $state.busyLine = $true",
                     "    $state.busyFlag = [System.IO.Path]::GetTempFileName()",
+                    "    $state.busyStatus = [System.IO.Path]::GetTempFileName()",
+                    "    try { [System.IO.File]::WriteAllText($state.busyStatus, $Text, [System.Text.Encoding]::ASCII) } catch {}",
                     "    $safeFlag = $state.busyFlag.Replace(\"'\", \"''\")",
-                    "    $safeText = $Text.Replace(\"'\", \"''\")",
-                    "    $script = \"`$ProgressPreference='SilentlyContinue'; `$flag='$safeFlag'; `$text='$safeText'; `$start=Get-Date; `$i=0; while(Test-Path -LiteralPath `$flag){ `$elapsed=[int]((Get-Date)-`$start).TotalSeconds; `$dots='.' * ((`$i % 3)+1); [Console]::Write(([char]13 + ('{0} {1}s {2}   ' -f `$text, `$elapsed, `$dots))); Start-Sleep -Milliseconds 220; `$i++ }; try { `$width=[Math]::Max(80,[Console]::BufferWidth-1) } catch { `$width=120 }; [Console]::Write(([char]13 + (' ' * `$width) + [char]13))\"",
+                    "    $safeStatus = $state.busyStatus.Replace(\"'\", \"''\")",
+                    "    $script = \"`$ProgressPreference='SilentlyContinue'; `$flag='$safeFlag'; `$statusFile='$safeStatus'; `$verbs=@('Thinking','Working','Hatching','Churning'); `$start=Get-Date; while(Test-Path -LiteralPath `$flag){ `$elapsed=[int]((Get-Date)-`$start).TotalSeconds; `$status=''; try { if(Test-Path -LiteralPath `$statusFile){ `$status=[System.IO.File]::ReadAllText(`$statusFile).Trim() } } catch {}; `$verb=`$verbs[[int]([Math]::Floor(`$elapsed / 3) % `$verbs.Count)]; `$dots='.' * ((`$elapsed % 3)+1); if(`$status -match '^thinking:(\\d+)$'){ `$label=('{0}{1} ~{2} tokens' -f `$verb, `$dots, `$Matches[1]) } elseif(`$status -match '^tool:(.+)$'){ `$label=('Tool ' + `$Matches[1]) } elseif(`$status -eq 'working' -or -not `$status){ `$label=`$verb + `$dots } else { `$label=`$status }; [Console]::Write(([char]13 + ('{0} {1}s   ' -f `$label, `$elapsed))); Start-Sleep -Milliseconds 1000 }; try { `$width=[Math]::Max(80,[Console]::BufferWidth-1) } catch { `$width=120 }; [Console]::Write(([char]13 + (' ' * `$width) + [char]13))\"",
                     "    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))",
                     "    try {",
                     "      $state.busyProcess = Start-Process powershell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-OutputFormat','Text','-EncodedCommand',$encoded) -NoNewWindow -PassThru",
                     "    } catch {",
                     "      [Console]::Write($Text + ' ... ')",
                     "    }",
+                    "  }",
+                    "  function Set-BusyStatus {",
+                    "    param([string]$Text)",
+                    "    if (-not $state.busyStatus) { return }",
+                    "    try { [System.IO.File]::WriteAllText($state.busyStatus, $Text, [System.Text.Encoding]::ASCII) } catch {}",
                     "  }",
                     "  function Shorten-Text {",
                     "    param([string]$Value, [int]$Max = 120)",
@@ -2594,17 +2621,15 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     "        if ($event.type -eq 'system' -and $event.subtype -eq 'init') {",
                     "          Clear-BusyLine",
                     "          Write-Host ('[Claude] model=' + $event.model + ' cwd=' + $event.cwd) -ForegroundColor DarkGray",
-                    "          Show-BusyLine 'Claude thinking'",
+                    "          Show-BusyLine 'thinking:0'",
                     "        } elseif ($event.type -eq 'stream_event') {",
                     "          $inner = $event.event",
                     "          if ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'text_delta') {",
                     "            Write-AssistantText ([string]$inner.delta.text)",
                     "          } elseif ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'thinking_delta') {",
                     "            $state.thinkingChars = [int]$state.thinkingChars + ([string]$inner.delta.thinking).Length",
-                    "            if (($state.thinkingChars - [int]$state.lastThinkingLog) -ge 120) {",
-                    "              $state.lastThinkingLog = $state.thinkingChars",
-                    "              Write-ActivityLog ('Thinking... ' + $state.thinkingChars + ' chars')",
-                    "            }",
+                    "            $state.thinkingTokens = [int][Math]::Max(1, [Math]::Ceiling([double]$state.thinkingChars / 4.0))",
+                    "            if ($state.busyLine) { Set-BusyStatus ('thinking:' + $state.thinkingTokens) } elseif (-not $state.openLine) { Show-BusyLine ('thinking:' + $state.thinkingTokens) }",
                     "          } elseif ($inner.type -eq 'content_block_delta' -and $inner.delta -and $inner.delta.type -eq 'input_json_delta') {",
                     "            $indexKey = [string]$inner.index",
                     "            if ($state.toolParts.ContainsKey($indexKey)) {",
@@ -2633,8 +2658,8 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     "              $state.toolTotal = [int]$state.toolTotal + 1",
                     "              Clear-BusyLine",
                     "              if ($state.openLine) { [Console]::WriteLine(); $state.openLine = $false }",
-                    "              $busyText = 'Tool ' + [string]$inner.content_block.name",
-                    "              if (-not [string]$inner.content_block.name) { $busyText = 'AI working' }",
+                    "              $busyText = 'tool:' + [string]$inner.content_block.name",
+                    "              if (-not [string]$inner.content_block.name) { $busyText = 'working' }",
                     "              Show-BusyLine $busyText",
                     "            }",
                     "          } elseif ($inner.type -eq 'message_start') {",
@@ -2943,6 +2968,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void handleAsyncFailure(Throwable error) {
             Throwable cause = rootCause(error);
+            if (isSessionExpiredError(cause)) {
+                handleSessionExpiredFailure(cause);
+                return;
+            }
             setStatus("失败：" + briefStatusError(cause));
             debugLog("async-failed", readableError(cause));
             if (!isTransientNetworkError(cause)) {
@@ -3004,10 +3033,32 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
 
         private void showDetailedError(String title, Throwable error) {
             Throwable cause = rootCause(error);
+            if (isSessionExpiredError(cause)) {
+                handleSessionExpiredFailure(cause);
+                return;
+            }
             setStatus("失败：" + briefStatusError(cause));
             debugLog("detailed-error", readableError(cause));
             if (!isTransientNetworkError(cause)) {
                 showErrorPopupWithOptOut(title, detailedError(cause));
+            }
+        }
+
+        private void handleSessionExpiredFailure(Throwable cause) {
+            debugLog("session-expired", readableError(cause));
+            client.clearSession();
+            clearPasswordMaskIfNoSavedPassword();
+            updateLoginState(false);
+            savePreferences();
+            setStatus("禅道登录已超时，请重新输入密码后登录。");
+        }
+
+        private void clearPasswordMaskIfNoSavedPassword() {
+            if (!PASSWORD_MASK.equals(visiblePasswordText())) {
+                return;
+            }
+            if (loadPasswordSecurely(serverField.getText(), accountField.getText()).isBlank()) {
+                passwordField.setText("");
             }
         }
 
@@ -3877,6 +3928,10 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 return !cookieJar.isEmpty();
             }
 
+            private void clearSession() {
+                cookieJar.clear();
+            }
+
             private void restoreSession(String serverUrl, String cookies) {
                 baseUrl = normalizeBaseUrl(serverUrl);
                 cookieJar.clear();
@@ -4629,84 +4684,59 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 List<Map<String, String>> result = new ArrayList<>();
                 List<Map<String, String>> bases = bugScopeParamVariants(base);
                 for (Map<String, String> scopedBase : bases) {
+                    Map<String, String> lowercaseProductParams = withLowercaseProductId(scopedBase);
                     Map<String, String> visible = new LinkedHashMap<>(scopedBase);
                     visible.put("branch", "all");
                     visible.put("browseType", "unclosed");
                     visible.put("param", "0");
                     visible.put("orderBy", "");
                     result.add(visible);
-                    String scopedId = firstNonBlank(
-                            scopedBase.get("productID"),
-                            scopedBase.get("productid"),
-                            scopedBase.get("projectID"),
-                            scopedBase.get("executionID")
-                    );
-                    if (scopedId != null && !scopedId.isBlank()) {
-                        Map<String, String> lowerVisible = new LinkedHashMap<>(scopedBase);
-                        lowerVisible.remove("productID");
-                        lowerVisible.put("productid", scopedId);
-                        lowerVisible.put("branch", "all");
-                        lowerVisible.put("browseType", "unclosed");
-                        lowerVisible.put("param", "0");
-                        lowerVisible.put("orderBy", "");
-                        result.add(lowerVisible);
-                    }
+                    Map<String, String> lowerVisible = new LinkedHashMap<>(lowercaseProductParams);
+                    lowerVisible.put("branch", "all");
+                    lowerVisible.put("browseType", "unclosed");
+                    lowerVisible.put("param", "0");
+                    lowerVisible.put("orderBy", "");
+                    result.add(lowerVisible);
+                    Map<String, String> lowerUnresolved = new LinkedHashMap<>(lowercaseProductParams);
+                    lowerUnresolved.put("branch", "all");
+                    lowerUnresolved.put("browseType", "unresolved");
+                    result.add(lowerUnresolved);
+                    Map<String, String> upperUnresolved = new LinkedHashMap<>(scopedBase);
+                    upperUnresolved.put("branch", "all");
+                    upperUnresolved.put("browseType", "unresolved");
+                    result.add(upperUnresolved);
+                    result.add(scopedBase);
                     Map<String, String> exactBySearch = new LinkedHashMap<>(scopedBase);
                     exactBySearch.put("branch", "all");
                     exactBySearch.put("browseType", "bySearch");
                     exactBySearch.put("param", "0");
                     exactBySearch.put("orderBy", "");
                     result.add(exactBySearch);
-                    if (scopedId != null && !scopedId.isBlank()) {
-                        Map<String, String> lowerBySearch = new LinkedHashMap<>(scopedBase);
-                        lowerBySearch.remove("productID");
-                        lowerBySearch.put("productid", scopedId);
-                        lowerBySearch.put("branch", "all");
-                        lowerBySearch.put("browseType", "bySearch");
-                        lowerBySearch.put("param", "0");
-                        lowerBySearch.put("orderBy", "");
-                        result.add(lowerBySearch);
-                    }
-                }
-                result.addAll(bases);
-                for (Map<String, String> scopedBase : bases) {
-                    String scopedId = firstNonBlank(
-                            scopedBase.get("productID"),
-                            scopedBase.get("productid"),
-                            scopedBase.get("projectID"),
-                            scopedBase.get("executionID")
-                    );
-                    if (scopedId == null) scopedId = "";
-                    Map<String, String> browser = new LinkedHashMap<>(base);
-                    browser.remove("productID");
-                    if (!scopedId.isBlank()) {
-                        browser = new LinkedHashMap<>(scopedBase);
-                        browser.remove("productID");
-                        browser.put("productid", scopedId);
-                        browser.put("branch", "all");
-                        browser.put("browseType", "unresolved");
-                        result.add(browser);
-                    }
-                    Map<String, String> unresolvedUpper = new LinkedHashMap<>(scopedBase);
-                    unresolvedUpper.put("branch", "all");
-                    unresolvedUpper.put("browseType", "unresolved");
-                    result.add(unresolvedUpper);
-                    Map<String, String> bySearchUpper = new LinkedHashMap<>(scopedBase);
-                    bySearchUpper.put("branch", "all");
-                    bySearchUpper.put("browseType", "bySearch");
-                    bySearchUpper.put("param", "0");
-                    bySearchUpper.put("orderBy", "");
-                    result.add(bySearchUpper);
-                    Map<String, String> bySearchLower = new LinkedHashMap<>(browser);
-                    bySearchLower.put("browseType", "bySearch");
-                    bySearchLower.put("param", "0");
-                    bySearchLower.put("orderBy", "");
-                    result.add(bySearchLower);
-                    for (String type : List.of("bySearch", "all", "unclosed", "assigntome")) {
-                        Map<String, String> next = new LinkedHashMap<>(scopedBase);
-                        next.put("browseType", type);
-                        result.add(next);
-                    }
+                    Map<String, String> lowerBySearch = new LinkedHashMap<>(lowercaseProductParams);
+                    lowerBySearch.put("branch", "all");
+                    lowerBySearch.put("browseType", "bySearch");
+                    lowerBySearch.put("param", "0");
+                    lowerBySearch.put("orderBy", "");
+                    result.add(lowerBySearch);
+                    Map<String, String> lowerBySearchSimple = new LinkedHashMap<>(lowercaseProductParams);
+                    lowerBySearchSimple.put("branch", "all");
+                    lowerBySearchSimple.put("browseType", "bySearch");
+                    result.add(lowerBySearchSimple);
+                    Map<String, String> unresolved = new LinkedHashMap<>(scopedBase);
+                    unresolved.put("browseType", "unresolved");
+                    result.add(unresolved);
+                    Map<String, String> bySearch = new LinkedHashMap<>(scopedBase);
+                    bySearch.put("browseType", "bySearch");
+                    result.add(bySearch);
+                    Map<String, String> all = new LinkedHashMap<>(scopedBase);
+                    all.put("browseType", "all");
+                    result.add(all);
+                    Map<String, String> unclosed = new LinkedHashMap<>(scopedBase);
+                    unclosed.put("browseType", "unclosed");
+                    result.add(unclosed);
+                    Map<String, String> assignToMe = new LinkedHashMap<>(scopedBase);
+                    assignToMe.put("browseType", "assigntome");
+                    result.add(assignToMe);
                     Map<String, String> ordered = new LinkedHashMap<>(scopedBase);
                     ordered.put("browseType", "all");
                     ordered.put("param", "0");
@@ -4714,6 +4744,14 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                     result.add(ordered);
                 }
                 return dedupeParams(result);
+            }
+
+            private static Map<String, String> withLowercaseProductId(Map<String, String> params) {
+                Map<String, String> next = new LinkedHashMap<>(params);
+                if (next.containsKey("productID")) {
+                    next.put("productid", next.remove("productID"));
+                }
+                return next;
             }
 
             private static List<Map<String, String>> bugScopeParamVariants(Map<String, String> baseParams) {
@@ -4958,7 +4996,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private String get(String path, Map<String, String> params, boolean ajax) throws Exception {
-                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(HTTP_REQUEST_TIMEOUT).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
+                HttpRequest.Builder builder = HttpRequest.newBuilder(buildUri(path, params)).timeout(HTTP_REQUEST_TIMEOUT).GET().header("User-Agent", "ZenTaoBugAssistant-IDEA/1.1.0").header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
                 if (ajax) builder.header("X-Requested-With", "XMLHttpRequest");
                 addCookieHeader(builder);
                 HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -5030,7 +5068,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static String normalizeBaseUrl(String value) {
-                String url = value == null || value.isBlank() ? DEFAULT_SERVER : value.trim();
+                String url = value == null || value.isBlank() || isPlaceholderServerUrl(value.trim()) ? DEFAULT_SERVER : value.trim();
                 return url.endsWith("/") ? url : url + "/";
             }
 
@@ -5388,7 +5426,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
                         .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
-                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1")
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.1.0")
                         .header("Accept", "image/*");
                 addCookieHeader(builder);
                 HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
@@ -5411,7 +5449,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
                 HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
                         .timeout(HTTP_REQUEST_TIMEOUT)
                         .GET()
-                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.0.1")
+                        .header("User-Agent", "ZenTaoBugAssistant-IDEA/1.1.0")
                         .header("Accept", "image/*,*/*;q=0.8");
                 addCookieHeader(builder);
                 HttpResponse<byte[]> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
@@ -5572,9 +5610,9 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
             }
 
             private static String parseStatus(String value) {
+                if (value.matches("(?is).*(激活|active).*")) return "active";
                 if (value.matches("(?is).*(已解决|resolved).*")) return "resolved";
                 if (value.matches("(?is).*(关闭|closed).*")) return "closed";
-                if (value.matches("(?is).*(激活|active).*")) return "active";
                 return "unknown";
             }
 

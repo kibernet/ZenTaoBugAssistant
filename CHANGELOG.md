@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1
+## 1.1.0
 
 - Added Chat / CLI repair modes across VS Code / Cursor and IntelliJ IDEA.
 - Added CLI prompt files and command templates for command-line AI agents.
