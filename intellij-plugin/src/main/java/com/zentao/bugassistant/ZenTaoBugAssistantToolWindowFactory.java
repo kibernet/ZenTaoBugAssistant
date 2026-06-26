@@ -1187,7 +1187,7 @@ public class ZenTaoBugAssistantToolWindowFactory implements ToolWindowFactory {
         private static CredentialAttributes passwordAttributes(String serverUrl, String account) {
             String serviceName = "ZenTao Bug Assistant/" + normalizeServerUrl(serverUrl);
             String userName = account == null ? "" : account.trim();
-            return new CredentialAttributes(serviceName, userName, ZenTaoBugAssistantToolWindowFactory.class);
+            return new CredentialAttributes(serviceName, userName);
         }
 
         private String visiblePasswordText() {
