@@ -24,15 +24,19 @@ document.getElementById("serverUrl").addEventListener("blur", (event) => {
 document.getElementById("account").addEventListener("change", (event) => {
   post("setLoginAccount", { loginAccount: event.target.value });
 });
+document.getElementById("account").addEventListener("input", (event) => {
+  post("setLoginAccount", { loginAccount: event.target.value });
+});
 document.getElementById("account").addEventListener("blur", (event) => {
   post("setLoginAccount", { loginAccount: event.target.value });
 });
-document.getElementById("password").addEventListener("focus", (event) => {
-  const input = event.target;
-  if (input.dataset.saved === "true") {
-    input.value = "";
-    input.dataset.saved = "false";
+document.getElementById("password").addEventListener("keydown", (event) => {
+  if (isPasswordEditKey(event)) {
+    clearSavedPasswordMask(event.target);
   }
+});
+document.getElementById("password").addEventListener("paste", (event) => {
+  clearSavedPasswordMask(event.target);
 });
 document.getElementById("autoLogin").addEventListener("change", (event) => {
   post("setAutoLogin", { autoLoginEnabled: event.target.checked });
@@ -78,8 +82,9 @@ function render(state) {
     serverInput.value = state.serverUrl ?? "";
   }
   const accountInput = document.getElementById("account");
-  if (document.activeElement !== accountInput) {
-    accountInput.value = state.loginAccount ?? "";
+  const accountValue = state.loginAccount || state.account || "";
+  if (document.activeElement !== accountInput || !accountInput.value.trim()) {
+    accountInput.value = accountValue;
   }
   const passwordInput = document.getElementById("password");
   if (document.activeElement !== passwordInput) {
@@ -456,7 +461,7 @@ function renderLoginState(state) {
 function renderFilters(state) {
   const project = document.getElementById("project");
   const currentProject = project.value;
-  project.innerHTML = `<option value="">全部项目</option>`;
+  project.innerHTML = `<option value="" disabled>请选择项目</option>`;
   for (const item of state.projects ?? []) {
     const option = document.createElement("option");
     option.value = item.id;
@@ -697,6 +702,20 @@ function postLogin() {
     password: document.getElementById("password").value,
     autoLoginEnabled: document.getElementById("autoLogin").checked
   });
+}
+
+function clearSavedPasswordMask(input) {
+  if (input.dataset.saved === "true") {
+    input.value = "";
+    input.dataset.saved = "false";
+  }
+}
+
+function isPasswordEditKey(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return false;
+  }
+  return event.key.length === 1 || event.key === "Backspace" || event.key === "Delete";
 }
 
 function post(type, payload = {}) {

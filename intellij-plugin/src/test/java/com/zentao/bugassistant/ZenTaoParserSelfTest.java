@@ -200,16 +200,41 @@ public final class ZenTaoParserSelfTest {
         assertEquals(1, zentao18Pager.get("pageID"), "zentao 18 pager pageID");
         assertEquals(2, zentao18Pager.get("pageTotal"), "zentao 18 pager pageTotal");
 
+        String currentUnclosedPagerHtml = jsonHtml(
+                "<input type=\"hidden\" id=\"recTotal\" value=\"32\">\n" +
+                "<input type=\"hidden\" id=\"recPerPage\" value=\"20\">\n" +
+                "<input type=\"hidden\" id=\"pageID\" value=\"1\">\n" +
+                "<a href=\"/index.php?m=bug&amp;f=browse&amp;productID=34&amp;branch=all&amp;browseType=unclosed&amp;recTotal=32&amp;recPerPage=20&amp;pageID=2\">2</a>\n");
+        Map<String, Integer> currentUnclosedPager = ZenTaoBugAssistantToolWindowFactory.parseBugPagerForTest(currentUnclosedPagerHtml);
+        assertEquals(32, currentUnclosedPager.get("recTotal"), "current unclosed pager recTotal");
+        assertEquals(20, currentUnclosedPager.get("recPerPage"), "current unclosed pager recPerPage");
+        assertEquals(1, currentUnclosedPager.get("pageID"), "current unclosed pager pageID");
+        assertEquals(2, currentUnclosedPager.get("pageTotal"), "current unclosed pager pageTotal");
+
         List<Map<String, String>> bugParams = ZenTaoBugAssistantToolWindowFactory.bugParamsForTest("34");
         if (bugParams.isEmpty()) {
             throw new AssertionError("bug params should not be empty");
         }
-        assertEquals("34", bugParams.get(0).get("productID"), "first bug param should match VS Code productID scope");
+        assertEquals("34", bugParams.get(0).get("productid"), "first bug param should match ZenTao web productid scope");
         assertEquals("unclosed", bugParams.get(0).get("browseType"), "first bug param browseType");
-        boolean hasLowerUnresolved = bugParams.stream().anyMatch(params ->
-                "34".equals(params.get("productid")) && "unresolved".equals(params.get("browseType")));
-        if (!hasLowerUnresolved) {
-            throw new AssertionError("bug params should include VS Code lowercase productid unresolved candidate");
+        assertEquals("all", bugParams.get(0).get("branch"), "first bug param branch");
+        assertEquals("0", bugParams.get(0).get("param"), "first bug param param");
+        assertEquals("", bugParams.get(0).get("orderBy"), "first bug param orderBy");
+        if (bugParams.size() != 1) {
+            throw new AssertionError("normal bug list params should match the ZenTao web unclosed entry exactly, but got " + bugParams);
+        }
+        boolean hasBroadFallback = bugParams.stream().anyMatch(params ->
+                "all".equals(params.get("browseType"))
+                        || "bySearch".equals(params.get("browseType"))
+                        || "unresolved".equals(params.get("browseType"))
+                        || "assigntome".equals(params.get("browseType"))
+                        || params.containsKey("productID")
+                        || params.containsKey("projectID")
+                        || params.containsKey("executionID")
+                        || "project".equals(params.get("m"))
+                        || "execution".equals(params.get("m")));
+        if (hasBroadFallback) {
+            throw new AssertionError("normal bug list params must not fall back to all/project/execution scopes");
         }
 
         String prompt = ZenTaoBugAssistantToolWindowFactory.buildPromptForTest();

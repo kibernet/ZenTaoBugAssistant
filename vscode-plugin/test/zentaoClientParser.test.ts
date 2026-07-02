@@ -1,7 +1,7 @@
 import assert from "assert/strict";
 import { __zentaoParserTestInternals } from "../src/core/zentaoClient";
 
-const { normalizeZenTaoHtml, parseBugList, parseBugListPager } = __zentaoParserTestInternals;
+const { normalizeZenTaoHtml, parseBugList, parseBugListPager, bugBrowseParamSetsFromBase } = __zentaoParserTestInternals;
 
 const bugTableHtml = `
 <table>
@@ -198,5 +198,48 @@ assert.equal(zentao18Bugs[0].priority, "medium");
 assert.equal(zentao18Bugs[0].openedBy, "施健");
 assert.equal(zentao18Bugs[0].assignedTo, "蔡宏亮");
 assert.equal(zentao18Bugs[0].confirmed, false);
+
+const zentao18Pager = parseBugListPager(zentao18TableHtml);
+assert.equal(zentao18Pager?.recTotal, 22);
+assert.equal(zentao18Pager?.recPerPage, 20);
+assert.equal(zentao18Pager?.pageID, 1);
+assert.equal(zentao18Pager?.pageTotal, 2);
+
+const currentUnclosedPagerHtml = JSON.stringify({
+  result: "success",
+  data: `
+    <input type="hidden" id="recTotal" value="32">
+    <input type="hidden" id="recPerPage" value="20">
+    <input type="hidden" id="pageID" value="1">
+    <a href="/index.php?m=bug&amp;f=browse&amp;productID=34&amp;branch=all&amp;browseType=unclosed&amp;recTotal=32&amp;recPerPage=20&amp;pageID=2">2</a>`
+});
+const currentUnclosedPager = parseBugListPager(currentUnclosedPagerHtml);
+assert.equal(currentUnclosedPager?.recTotal, 32);
+assert.equal(currentUnclosedPager?.recPerPage, 20);
+assert.equal(currentUnclosedPager?.pageID, 1);
+assert.equal(currentUnclosedPager?.pageTotal, 2);
+
+const bugParams = bugBrowseParamSetsFromBase({ m: "bug", f: "browse", productID: "34" });
+assert.deepEqual(bugParams, [
+  { m: "bug", f: "browse", productid: "34", branch: "all", browseType: "unclosed", param: "0", orderBy: "" }
+]);
+assert.ok(
+  bugParams.every(
+    (params) =>
+      params.browseType === "unclosed" &&
+      params.branch === "all" &&
+      params.param === "0" &&
+      params.orderBy === "" &&
+      params.browseType !== "all" &&
+      params.browseType !== "bySearch" &&
+      params.browseType !== "unresolved" &&
+      params.browseType !== "assigntome" &&
+      !("projectID" in params) &&
+      !("executionID" in params) &&
+      !("productID" in params) &&
+      params.m !== "project" &&
+      params.m !== "execution"
+  )
+);
 
 console.log("ZenTao parser regression tests passed.");

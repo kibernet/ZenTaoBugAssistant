@@ -117,6 +117,7 @@ export class ZenTaoClient {
       throw new Error(`登录失败：${message}`);
     }
 
+    this.useQaAppContext();
     const cookie = this.cookieHeader || extractCookie(setCookieHeader);
     if (!cookie) {
       throw new Error("登录失败：禅道未返回有效会话 Cookie。");
@@ -153,16 +154,17 @@ export class ZenTaoClient {
 
   async listMembers(projectId?: string): Promise<ZenTaoMember[]> {
     this.ensureSession();
-    const selectNames = projectId
-      ? ["assignedTo", "assignedTo[]"]
-      : ["assignedTo", "assignedTo[]", "openedBy", "resolvedBy", "closedBy", "confirmedBy", "lastEditedBy"];
+    this.useQaAppContext();
+    const selectNames = ["assignedTo", "assignedTo[]", "openedBy", "resolvedBy", "closedBy", "confirmedBy", "lastEditedBy"];
     const result = new Map<string, ZenTaoMember>();
     const sources = memberSources(projectId);
     const pages = await Promise.all(sources.map((source) => this.getText(source.path, source.params, source.ajax)));
 
     for (const html of pages) {
-      for (const member of parseMembersFromSelects(html, selectNames)) {
-        result.set(member.account, member);
+      if (!projectId) {
+        for (const member of parseMembersFromSelects(html, selectNames)) {
+          result.set(member.account, member);
+        }
       }
       for (const member of parseMembersFromTeamTable(html)) {
         result.set(member.account, member);
@@ -287,6 +289,7 @@ export class ZenTaoClient {
 
   async listBugs(query: BugListQuery = {}): Promise<ZenTaoBugSummary[]> {
     this.ensureSession();
+    this.useQaAppContext();
     const assignees = resolveAssignees(query, this.session?.account);
     // #region agent log
     debugLog("B1,B2,B3", "vscode-plugin/src/core/zentaoClient.ts:196", "bug list request starting", {
@@ -375,12 +378,14 @@ export class ZenTaoClient {
     });
     // #endregion
     assertBugListParseHealthy(firstHtml, firstBugs, firstParams);
+    const unclosedBrowse = isUnclosedBrowseParams(baseParams);
+    const openOnlyBySearchFallback = isBySearchFallbackParams(baseParams) && firstBugs.length > 0 && firstBugs.every(isOpenBug);
+    const firstBugsToUse = filterBugListPage(firstBugs, unclosedBrowse, openOnlyBySearchFallback);
     if (!pager || pager.pageTotal <= 1) {
-      return firstBugs;
+      return firstBugsToUse;
     }
 
-    const openOnlyBySearchFallback = isBySearchFallbackParams(baseParams) && firstBugs.length > 0 && firstBugs.every(isOpenBug);
-    const allBugs = openOnlyBySearchFallback ? firstBugs.filter(isOpenBug) : [...firstBugs];
+    const allBugs = [...firstBugsToUse];
     for (let page = 2; page <= pager.pageTotal; page++) {
       const pageParams = {
         ...baseParams,
@@ -398,7 +403,7 @@ export class ZenTaoClient {
             break;
           }
         }
-        const bugsToAdd = openOnlyBySearchFallback ? pageBugs.filter(isOpenBug) : pageBugs;
+        const bugsToAdd = filterBugListPage(pageBugs, unclosedBrowse, openOnlyBySearchFallback);
         if (!bugsToAdd.length && allBugs.length) {
           break;
         }
@@ -648,6 +653,13 @@ export class ZenTaoClient {
     }
   }
 
+  private useQaAppContext(): void {
+    this.cookieJar.set("tab", "qa");
+    if (this.session && this.cookieHeader) {
+      this.session.cookie = this.cookieHeader;
+    }
+  }
+
   private authHeaders(): Record<string, string> {
     return this.cookieHeader ? { Cookie: this.cookieHeader } : {};
   }
@@ -766,7 +778,7 @@ export class ZenTaoClient {
         ...fetchInit,
         signal: controller.signal,
         headers: {
-          "User-Agent": "ZenTaoBugAssistant/1.1.0",
+          "User-Agent": "ZenTaoBugAssistant/1.2.0",
           Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
           ...(init.ajax === false ? {} : { "X-Requested-With": "XMLHttpRequest" }),
           ...this.authHeaders(),
@@ -877,31 +889,21 @@ function bugDiagnosticParams(baseParams: Record<string, string>): Array<Record<s
 }
 
 function bugBrowseParamSetsFromBase(baseParams: Record<string, string>): Array<Record<string, string>> {
-  return dedupeParamSets(
-    bugScopeParamVariants(baseParams).flatMap((params) => {
-      const lowercaseProductParams = withLowercaseProductId(params);
-      return [
-        { ...params, branch: "all", browseType: "unclosed", param: "0", orderBy: "" },
-        { ...lowercaseProductParams, branch: "all", browseType: "unclosed", param: "0", orderBy: "" },
-        { ...lowercaseProductParams, branch: "all", browseType: "unresolved" },
-        { ...params, branch: "all", browseType: "unresolved" },
-        params,
-        { ...params, branch: "all", browseType: "bySearch", param: "0", orderBy: "" },
-        { ...lowercaseProductParams, branch: "all", browseType: "bySearch", param: "0", orderBy: "" },
-        { ...lowercaseProductParams, branch: "all", browseType: "bySearch" },
-        { ...params, browseType: "unresolved" },
-        { ...params, browseType: "bySearch" },
-        { ...params, browseType: "all" },
-        { ...params, browseType: "unclosed" },
-        { ...params, browseType: "assigntome" },
-        { ...params, browseType: "all", param: "0", orderBy: "id_desc" }
-      ];
-    })
-  );
+  return bugListScopeParamVariants(baseParams).map((params) => ({
+    ...params,
+    branch: "all",
+    browseType: "unclosed",
+    param: "0",
+    orderBy: ""
+  }));
 }
 
 function memberSources(projectId?: string): Array<{ path: string; params: Record<string, string>; ajax: boolean }> {
   const sources: Array<{ path: string; params: Record<string, string>; ajax: boolean }> = [];
+  if (projectId) {
+    return [{ path: "index.php", params: { m: "product", f: "team", productID: projectId }, ajax: false }];
+  }
+
   for (const params of bugBrowseParamSets(projectId)) {
     sources.push({ path: "index.php", params, ajax: false });
     if (params.productID) {
@@ -912,40 +914,37 @@ function memberSources(projectId?: string): Array<{ path: string; params: Record
       });
     }
   }
-  if (projectId) {
-    sources.push(
-      { path: "index.php", params: { m: "bug", f: "create", productID: projectId }, ajax: false },
-      { path: "index.php", params: { m: "bug", f: "create", productID: projectId, branch: "0", moduleID: "0" }, ajax: false },
-      { path: "index.php", params: { m: "product", f: "team", productID: projectId }, ajax: false },
-      { path: "index.php", params: { m: "project", f: "team", projectID: projectId }, ajax: false },
-      { path: "index.php", params: { m: "execution", f: "team", executionID: projectId }, ajax: false }
-    );
-  }
   return dedupeMemberSources(sources);
 }
 
 function bugBrowseParamSets(projectId?: string, assignee?: string): Array<Record<string, string>> {
-  const bases = bugScopeParamVariants(buildBugBrowseParams(projectId, assignee));
-  const result: Array<Record<string, string>> = [];
-  for (const base of bases) {
-    result.push(
-      { ...base, branch: "all", browseType: "unclosed", param: "0", orderBy: "" },
-      { ...withLowercaseProductId(base), branch: "all", browseType: "unclosed", param: "0", orderBy: "" },
-      { ...base, branch: "all", browseType: "bySearch", param: "0", orderBy: "" },
-      { ...withLowercaseProductId(base), branch: "all", browseType: "bySearch", param: "0", orderBy: "" }
-    );
-  }
-  result.push(...bases);
-  for (const base of bases) {
-    for (const browseType of ["bySearch", "all", "unclosed", "assigntome"]) {
-      result.push({ ...base, browseType });
-    }
-  }
-  return dedupeParamSets(result);
+  return bugBrowseParamSetsFromBase(buildBugBrowseParams(projectId, assignee));
 }
 
 function isBySearchFallbackParams(params: Record<string, string>): boolean {
   return params.m === "bug" && params.f === "browse" && (params.browseType ?? "").toLowerCase() === "bysearch";
+}
+
+function isUnclosedBrowseParams(params: Record<string, string>): boolean {
+  return params.m === "bug" && params.f === "browse" && (params.browseType ?? "").toLowerCase() === "unclosed";
+}
+
+function filterBugListPage(
+  bugs: ZenTaoBugSummary[],
+  unclosedBrowse: boolean,
+  openOnlyBySearchFallback: boolean
+): ZenTaoBugSummary[] {
+  if (unclosedBrowse) {
+    return bugs.filter(isUnclosedBug);
+  }
+  if (openOnlyBySearchFallback) {
+    return bugs.filter(isOpenBug);
+  }
+  return bugs;
+}
+
+function isUnclosedBug(bug: ZenTaoBugSummary): boolean {
+  return bug.status !== "closed";
 }
 
 function isOpenBug(bug: ZenTaoBugSummary): boolean {
@@ -975,6 +974,19 @@ function bugScopeParamVariants(baseParams: Record<string, string>): Array<Record
     { ...base, m: "project", f: "bug", projectID: scopeId },
     { ...base, m: "execution", f: "bug", executionID: scopeId }
   ];
+}
+
+function bugListScopeParamVariants(baseParams: Record<string, string>): Array<Record<string, string>> {
+  const scopeId = baseParams.productID ?? baseParams.productid;
+  if (!scopeId) {
+    return [{ ...baseParams }];
+  }
+  const base = { ...baseParams };
+  delete base.productID;
+  delete base.productid;
+  delete base.projectID;
+  delete base.executionID;
+  return [{ ...base, productid: scopeId }];
 }
 
 function dedupeMemberSources(
@@ -1424,7 +1436,7 @@ function readPagerNumber(html: string, key: string): number | undefined {
     return key.toLowerCase() === "rectotal" ? Math.min(...hiddenValues) : hiddenValues[0];
   }
 
-  const fromUrl = [...html.matchAll(new RegExp(`(?:[?&]|&amp;)${key}=?(\\d+)`, "gi"))].map((match) => Number(match[1]));
+  const fromUrl = [...html.matchAll(new RegExp(`(?:[?&]|&amp;)${key}=(\\d+)`, "gi"))].map((match) => Number(match[1]));
   if (fromUrl.length) {
     if (key.toLowerCase() === "rectotal") {
       const positiveTotals = fromUrl.filter((value) => value > 0);
@@ -2313,7 +2325,8 @@ function normalizeZenTaoHtml(value: string): string {
 export const __zentaoParserTestInternals = {
   normalizeZenTaoHtml,
   parseBugList,
-  parseBugListPager
+  parseBugListPager,
+  bugBrowseParamSetsFromBase
 };
 
 function parseLoginResult(value: string): { result?: string | boolean; message?: string; locate?: string } | undefined {

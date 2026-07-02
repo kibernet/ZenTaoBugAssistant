@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Fixed stale ZenTao bug list refresh results overwriting the currently selected project.
+- Improved saved account and password restore behavior after reopening the tool window.
+- Improved project-scoped member caching and manual member refresh behavior.
+
 ## 1.1.0
 
 - Added Chat / CLI repair mode selection.

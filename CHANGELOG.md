@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Fixed ZenTao bug list refresh races when switching projects during an active request.
+- Improved saved account and password restore behavior across plugin reloads.
+- Improved project-scoped member caching and refresh behavior.
+
 ## 1.1.0
 
 - Added Chat / CLI repair modes across VS Code / Cursor and IntelliJ IDEA.

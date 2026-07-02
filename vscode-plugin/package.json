@@ -2,7 +2,7 @@
   "name": "zentao-bug-assistant-vscode",
   "displayName": "ZenTao Bug Assistant",
   "description": "AI-powered ZenTao bug repair context workflow for Cursor, Claude, and CLI agents.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "kibernet",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -159,8 +159,8 @@
         },
         "zentaoBugAssistant.rememberPassword": {
           "type": "boolean",
-          "default": false,
-          "description": "是否保存禅道密码。"
+          "default": true,
+          "description": "成功登录后安全保存禅道密码，用于下次自动登录；密码验证不通过时会要求重新输入。"
         },
         "zentaoBugAssistant.teamMembers": {
           "type": "array",
